@@ -51,9 +51,12 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
     _countsLoading = true;
     state = [...state];
     try {
-      final fetched = await ReportService.fetchCounts();
-      if (fetched != null) {
-        setStatusCounts(fetched);
+      final res = await ReportService.fetchCounts();
+      if (res['ok'] == true && res['data'] is Map<String, int>) {
+        setStatusCounts(Map<String, int>.from(res['data']));
+      } else {
+        // on error, clear counts and optionally persist empty map
+        setStatusCounts({});
       }
     } catch (_) {}
     _countsLoading = false;

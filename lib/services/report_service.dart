@@ -140,7 +140,9 @@ class ReportService {
 
   /// Fetch aggregated counts for the current user from the counts endpoint.
   /// Expected response shape: { "rejected": 1, "pending": 1, "resolved": 1 }
-  static Future<Map<String, int>?> fetchCounts() async {
+  /// Fetch counts and return a structured result: `{'ok':bool,'data':Map<String,int>}`
+  /// On failure returns `{'ok':false,'status':int?,'message':String}`.
+  static Future<Map<String, dynamic>> fetchCounts() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('access_token');
@@ -159,7 +161,8 @@ class ReportService {
       final resp = await http
           .get(uri, headers: headers)
           .timeout(const Duration(seconds: 10));
-      if (resp.statusCode >= 200 && resp.statusCode < 300) {
+      final status = resp.statusCode;
+      if (status >= 200 && status < 300) {
         final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
         final out = <String, int>{};
         decoded.forEach((k, v) {
@@ -169,10 +172,19 @@ class ReportService {
             out[k] = 0;
           }
         });
-        return out;
+        return {'ok': true, 'data': out};
       }
-    } catch (_) {}
-    return null;
+
+      // attempt to parse error body
+      try {
+        final decoded = jsonDecode(resp.body);
+        return {'ok': false, 'status': status, 'message': decoded.toString()};
+      } catch (_) {
+        return {'ok': false, 'status': status, 'message': resp.body};
+      }
+    } catch (e) {
+      return {'ok': false, 'message': e.toString()};
+    }
   }
 
   static Future<String?> _reverseGeocode(double lat, double lon) async {

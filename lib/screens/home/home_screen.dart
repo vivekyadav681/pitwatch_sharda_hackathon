@@ -25,6 +25,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> with RouteAware {
   }
 
   @override
+  void initState() {
+    super.initState();
+    // Fetch counts when this screen is first created (covers PageView use).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      try {
+        ref.read(potholeProvider.notifier).fetchAndSetCounts();
+      } catch (_) {}
+    });
+  }
+
+  @override
   void dispose() {
     try {
       routeObserver.unsubscribe(this);
