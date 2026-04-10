@@ -5,6 +5,7 @@ import 'package:pitwatch/screens/home/main_screen.dart';
 import 'package:pitwatch/widgets/auth/auth_button.dart';
 import 'package:pitwatch/widgets/auth/custom_text_field.dart';
 import 'package:pitwatch/services/account_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({Key? key}) : super(key: key);
@@ -42,6 +43,22 @@ class _LoginPageState extends State<LoginPage> {
     );
     setState(() => _loading = false);
     if (res['success'] == true) {
+      // Debug: print stored tokens to console
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final access = prefs.getString('access_token');
+        final refresh = prefs.getString('refresh_token');
+        final authPayload = prefs.getString('auth_payload');
+        debugPrint('Login tokens: access_token=$access');
+        debugPrint('Login tokens: refresh_token=$refresh');
+        debugPrint('Login tokens: auth_payload=$authPayload');
+      } catch (e) {
+        debugPrint('Failed to read tokens after login: $e');
+      }
+      // fetch and cache user profile after successful login
+      try {
+        await AccountService.fetchProfile();
+      } catch (_) {}
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (context) => const MainScreen()),

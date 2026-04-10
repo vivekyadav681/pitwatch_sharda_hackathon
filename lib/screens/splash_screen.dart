@@ -25,6 +25,17 @@ class _SplashScreenState extends State<SplashScreen> {
         if (!mounted) return;
         try {
           final prefs = await SharedPreferences.getInstance();
+          // Debug: dump all shared preference entries to console
+          try {
+            final keys = prefs.getKeys();
+            debugPrint('--- SharedPreferences dump start ---');
+            for (final k in keys) {
+              debugPrint('$k: ${prefs.get(k)}');
+            }
+            debugPrint('--- SharedPreferences dump end ---');
+          } catch (e) {
+            debugPrint('Failed to dump SharedPreferences: $e');
+          }
           final token = prefs.getString('access_token');
           if (token != null && token.trim().isNotEmpty) {
             Navigator.of(context).pushReplacement(

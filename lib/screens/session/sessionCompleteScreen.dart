@@ -11,6 +11,7 @@ import 'package:pitwatch/widgets/issue_card.dart';
 import 'package:pitwatch/services/report_service.dart';
 import 'package:pitwatch/widgets/session/success_button.dart';
 import 'package:pitwatch/widgets/session/view_details_button.dart';
+import 'package:pitwatch/screens/session/full_map_screen.dart';
 
 class SessionCompleteScreen extends ConsumerStatefulWidget {
   final List<Map<String, dynamic>> detections;
@@ -100,7 +101,9 @@ class _SessionCompleteScreenState extends ConsumerState<SessionCompleteScreen> {
       final ok = res['ok'] == true;
       if (ok) {
         try {
-          ref.read(potholeProvider.notifier).addDetection(parsed[i]);
+          // Do not store full detection locally here; only increment the
+          // global counts so the UI reflects the new totals.
+          ref.read(potholeProvider.notifier).incrementCountBy(1);
         } catch (_) {}
       } else {
         // re-add original map for retry later
@@ -196,7 +199,16 @@ class _SessionCompleteScreenState extends ConsumerState<SessionCompleteScreen> {
                           return RouteOverviewCard(
                             center: center,
                             detections: listDetections,
-                            onViewFullMap: () {},
+                            onViewFullMap: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => FullMapScreen(
+                                    detections: listDetections,
+                                    center: center,
+                                  ),
+                                ),
+                              );
+                            },
                           );
                         },
                       ),
@@ -415,6 +427,26 @@ class RouteOverviewCard extends StatelessWidget {
                     ),
                   ),
 
+                  // Make the entire mini-map tappable to open the full map screen.
+                  Positioned.fill(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap:
+                          onViewFullMap ??
+                          () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => FullMapScreen(
+                                  detections: detections,
+                                  center: center,
+                                ),
+                              ),
+                            );
+                          },
+                      child: Container(color: Colors.transparent),
+                    ),
+                  ),
+
                   /// Decorative markers (like in image)
                   Positioned(top: 20.h, left: 20.w, child: _dot(Colors.green)),
                   Positioned(
@@ -458,7 +490,18 @@ class RouteOverviewCard extends StatelessWidget {
 
                   /// Right: View Full Map
                   GestureDetector(
-                    onTap: onViewFullMap,
+                    onTap:
+                        onViewFullMap ??
+                        () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => FullMapScreen(
+                                detections: detections,
+                                center: center,
+                              ),
+                            ),
+                          );
+                        },
                     child: Text(
                       "View Full Map",
                       style: GoogleFonts.inter(

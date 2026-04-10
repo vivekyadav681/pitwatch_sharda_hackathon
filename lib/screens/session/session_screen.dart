@@ -43,6 +43,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   bool _isProcessing = false;
   List<PotholeDetection> _sessionDetections = [];
   static const double _detectionThreshold = 0.9; // reasonable default
+  static const double _nmsIouThreshold = 0.45;
   int _hazardsCount = 0;
 
   @override
@@ -241,7 +242,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       final int channels = (inputTensor.shape.length >= 4)
           ? inputTensor.shape[3]
           : (inputTensor.shape.isNotEmpty ? inputTensor.shape.last : 3);
-      _inputShape = [1, fixedSize, fixedSize, channels]; // [1, height, width, channels]
+      _inputShape = [
+        1,
+        fixedSize,
+        fixedSize,
+        channels,
+      ]; // [1, height, width, channels]
       _inputType = inputTensor.type;
 
       final rawLabels = await rootBundle.loadString('assets/model/labels.txt');
@@ -349,38 +355,37 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       final outType = outTensor.type;
 
       // If output is a single classification vector [1, N], use a flat double buffer.
-      // This is the common case for classification models and is safer/faster.
+      // For YOLO-like models the output is commonly [1, N, D] where D>=6.
       List<double> flat;
+      dynamic outputObj;
+      List<Map<String, dynamic>> yoloDetections = [];
+
       if (outShape.length == 2 && outShape[0] == 1) {
         final outSize = outShape[1];
         final output = List<double>.filled(outSize, 0.0);
         _interpreter!.run(input, output);
         flat = output;
       } else {
-        // Fallback: create nested buffer matching the shape and flatten it.
-        final output = _makeZeroList(outShape, outType);
-        _interpreter!.run(input, output);
-        flat = _flattenToDoubleList(output);
-      }
+        // Create nested buffer matching the shape and run inference into it.
+        outputObj = _makeZeroList(outShape, outType);
+        _interpreter!.run(input, outputObj);
 
-      int topIndex = 0;
-      double topScore = -double.infinity;
-      for (int i = 0; i < flat.length; i++) {
-        final val = flat[i];
-        if (val > topScore) {
-          topScore = val;
-          topIndex = i;
+        // If output looks like YOLO ([1, N, D] with D >= 6) parse it.
+        if (outShape.length == 3 && outShape[0] == 1 && outShape[2] >= 6) {
+          try {
+            yoloDetections = _parseYoloOutput(outputObj, inW, inH);
+          } catch (e) {
+            debugPrint('YOLO parse error: $e');
+          }
         }
+
+        // fallback to flatten for classification-like outputs
+        flat = _flattenToDoubleList(outputObj);
       }
 
-      final label = (topIndex < _labels.length)
-          ? _labels[topIndex]
-          : 'Label $topIndex';
-
-      if (topScore > _detectionThreshold) {
-        // Pothole detected — store location and notify user
-        final detectionMsg =
-            'Pothole detected (${topScore.toStringAsFixed(2)})';
+      // If YOLO detections were produced, handle them (multiple per frame)
+      if (yoloDetections.isNotEmpty) {
+        final detectionMsg = 'Potholes detected (${yoloDetections.length})';
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -408,47 +413,50 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
               debugPrint('Reverse geocode error: $e');
             }
 
-            final detection = PotholeDetection(
-              id: DateTime.now().millisecondsSinceEpoch,
-              title: titleFromOsm.isNotEmpty
-                  ? titleFromOsm
-                  : (label.isNotEmpty ? label : 'Pothole'),
-              description:
-                  'Detected by model (score ${topScore.toStringAsFixed(2)})',
-              status: PotholeStatus.pending,
-              latitude: pos.latitude,
-              longitude: pos.longitude,
-              createdAt: DateTime.now().toIso8601String(),
-            );
+            // For each YOLO detection, create a PotholeDetection using current GPS
+            int created = 0;
+            for (final det in yoloDetections) {
+              if (created >= 6) break; // limit per-frame creations
+              final score = det['score'] as double;
+              final labelIdx = det['class'] as int;
+              final lab = (labelIdx < _labels.length)
+                  ? _labels[labelIdx]
+                  : 'pothole';
 
-            // store in-session list and update UI (increment hazards)
-            setState(() {
-              _sessionDetections.add(detection);
-              _hazardsCount++;
-            });
+              final detection = PotholeDetection(
+                id: DateTime.now().millisecondsSinceEpoch + created,
+                title: titleFromOsm.isNotEmpty ? titleFromOsm : lab,
+                description:
+                    'Detected by YOLOv8 (score ${score.toStringAsFixed(2)})',
+                status: PotholeStatus.pending,
+                latitude: pos.latitude,
+                longitude: pos.longitude,
+                createdAt: DateTime.now().toIso8601String(),
+              );
 
-            // update Riverpod provider with full detection
-            try {
-              ref.read(potholeProvider.notifier).addDetection(detection);
-            } catch (e) {
-              debugPrint('Provider update failed: $e');
+              // store in-session list and update UI (increment hazards)
+              setState(() {
+                _sessionDetections.add(detection);
+                _hazardsCount++;
+              });
+
+              // update Riverpod session provider (store full detection for upload)
+              try {
+                ref
+                    .read(sessionPotholesProvider.notifier)
+                    .add(detection.toJson());
+              } catch (e) {
+                debugPrint('Failed to add detection to session provider: $e');
+              }
+
+              // persist immediately as well
+              await _saveDetection(detection.toJson());
+
+              created++;
             }
 
-            // also store the full detection in session-level Riverpod state
-            try {
-              ref
-                  .read(sessionPotholesProvider.notifier)
-                  .add(detection.toJson());
-            } catch (e) {
-              debugPrint('Failed to add detection to session provider: $e');
-            }
-
-            // persist immediately as well
-            await _saveDetection(detection.toJson());
-
-            debugPrint('Detection saved at ${pos.latitude}, ${pos.longitude}');
             debugPrint(
-              'Session detections count: ${_sessionDetections.length}',
+              'YOLO detections created: $created at ${pos.latitude}, ${pos.longitude}',
             );
           } catch (e) {
             debugPrint('Failed to get location: $e');
@@ -457,11 +465,84 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           debugPrint('Location permission not granted; detection not saved');
         }
       } else {
-        final msg = '$label (${topScore.toStringAsFixed(2)})';
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(msg), duration: const Duration(seconds: 2)),
-          );
+        // classification fallback: find top index
+        int topIndex = 0;
+        double topScore = -double.infinity;
+        for (int i = 0; i < flat.length; i++) {
+          final val = flat[i];
+          if (val > topScore) {
+            topScore = val;
+            topIndex = i;
+          }
+        }
+
+        final label = (topIndex < _labels.length)
+            ? _labels[topIndex]
+            : 'Label $topIndex';
+        if (topScore > _detectionThreshold) {
+          final detectionMsg =
+              'Pothole detected (${topScore.toStringAsFixed(2)})';
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(detectionMsg),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
+
+          final hasPermission = await _ensureLocationPermission();
+          if (hasPermission) {
+            try {
+              final pos = await Geolocator.getCurrentPosition(
+                desiredAccuracy: LocationAccuracy.high,
+              );
+              String titleFromOsm = '';
+              try {
+                final place = await _reverseGeocode(
+                  pos.latitude,
+                  pos.longitude,
+                );
+                if (place != null && place.trim().isNotEmpty)
+                  titleFromOsm = place;
+              } catch (e) {}
+
+              final detection = PotholeDetection(
+                id: DateTime.now().millisecondsSinceEpoch,
+                title: titleFromOsm.isNotEmpty ? titleFromOsm : label,
+                description:
+                    'Detected by model (score ${topScore.toStringAsFixed(2)})',
+                status: PotholeStatus.pending,
+                latitude: pos.latitude,
+                longitude: pos.longitude,
+                createdAt: DateTime.now().toIso8601String(),
+              );
+
+              setState(() {
+                _sessionDetections.add(detection);
+                _hazardsCount++;
+              });
+
+              try {
+                ref
+                    .read(sessionPotholesProvider.notifier)
+                    .add(detection.toJson());
+              } catch (_) {}
+              await _saveDetection(detection.toJson());
+            } catch (e) {
+              debugPrint('Failed to get location: $e');
+            }
+          }
+        } else {
+          final msg = '$label (${topScore.toStringAsFixed(2)})';
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(msg),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
         }
       }
     } catch (e, st) {
@@ -536,6 +617,141 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       out.add(v ?? 0.0);
     }
     return out;
+  }
+
+  /// Parse YOLO-like model output in the shape [1, N, D] where D >= 6
+  /// Expected row format: [cx, cy, w, h, conf, ...class_scores]
+  List<Map<String, dynamic>> _parseYoloOutput(
+    dynamic outputObj,
+    int inW,
+    int inH,
+  ) {
+    final results = <Map<String, dynamic>>[];
+    try {
+      if (outputObj is List && outputObj.isNotEmpty) {
+        final outer = outputObj[0];
+        if (outer is List) {
+          for (final row in outer) {
+            if (row is List) {
+              final r = row
+                  .map(
+                    (e) => (e is num)
+                        ? e.toDouble()
+                        : double.tryParse(e.toString()) ?? 0.0,
+                  )
+                  .toList();
+              if (r.length < 6) continue;
+              final cx = r[0];
+              final cy = r[1];
+              final w = r[2];
+              final h = r[3];
+              final conf = r[4];
+              final classScores = r.sublist(5);
+              if (classScores.isEmpty) continue;
+              // find best class
+              int best = 0;
+              double bestCls = -double.infinity;
+              for (int i = 0; i < classScores.length; i++) {
+                final v = (classScores[i] is num)
+                    ? (classScores[i] as num).toDouble()
+                    : double.tryParse(classScores[i].toString()) ?? 0.0;
+                if (v > bestCls) {
+                  bestCls = v;
+                  best = i;
+                }
+              }
+              final score = conf * bestCls;
+              if (score < _detectionThreshold) continue;
+
+              // Convert box to pixel coordinates. If coords appear normalized (<=1), scale by inW/inH
+              double x1, y1, x2, y2;
+              if (cx <= 1.01 && cy <= 1.01 && w <= 1.01 && h <= 1.01) {
+                final px = cx * inW;
+                final py = cy * inH;
+                final pw = w * inW;
+                final ph = h * inH;
+                x1 = px - pw / 2;
+                y1 = py - ph / 2;
+                x2 = px + pw / 2;
+                y2 = py + ph / 2;
+              } else {
+                x1 = cx - w / 2;
+                y1 = cy - h / 2;
+                x2 = cx + w / 2;
+                y2 = cy + h / 2;
+              }
+
+              results.add({
+                'class': best,
+                'score': score,
+                'box': [x1, y1, x2, y2],
+              });
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Error parsing YOLO output: $e');
+    }
+
+    // Apply NMS
+    final kept = _nms(results, _nmsIouThreshold);
+    return kept;
+  }
+
+  List<Map<String, dynamic>> _nms(
+    List<Map<String, dynamic>> dets,
+    double iouThresh,
+  ) {
+    if (dets.isEmpty) return [];
+    final byScore = List<Map<String, dynamic>>.from(dets);
+    byScore.sort(
+      (a, b) => (b['score'] as double).compareTo(a['score'] as double),
+    );
+    final kept = <Map<String, dynamic>>[];
+    for (final d in byScore) {
+      final box = d['box'] as List<dynamic>;
+      bool skip = false;
+      for (final k in kept) {
+        final ob = k['box'] as List<dynamic>;
+        final iou = _iou(box.cast<double>(), ob.cast<double>());
+        if (iou > iouThresh) {
+          skip = true;
+          break;
+        }
+      }
+      if (!skip) kept.add(d);
+    }
+    return kept;
+  }
+
+  double _iou(List<double> a, List<double> b) {
+    final x1 = a[0].clamp(double.negativeInfinity, double.infinity);
+    final y1 = a[1].clamp(double.negativeInfinity, double.infinity);
+    final x2 = a[2].clamp(double.negativeInfinity, double.infinity);
+    final y2 = a[3].clamp(double.negativeInfinity, double.infinity);
+    final x1b = b[0];
+    final y1b = b[1];
+    final x2b = b[2];
+    final y2b = b[3];
+
+    final interLeft = x1 > x1b ? x1 : x1b;
+    final interTop = y1 > y1b ? y1 : y1b;
+    final interRight = x2 < x2b ? x2 : x2b;
+    final interBottom = y2 < y2b ? y2 : y2b;
+    final interW = (interRight - interLeft).clamp(0.0, double.infinity);
+    final interH = (interBottom - interTop).clamp(0.0, double.infinity);
+    final interArea = interW * interH;
+
+    final areaA =
+        (x2 - x1).clamp(0.0, double.infinity) *
+        (y2 - y1).clamp(0.0, double.infinity);
+    final areaB =
+        (x2b - x1b).clamp(0.0, double.infinity) *
+        (y2b - y1b).clamp(0.0, double.infinity);
+    final union = areaA + areaB - interArea;
+    if (union <= 0) return 0.0;
+    return interArea / union;
   }
 
   String _formatDuration() {

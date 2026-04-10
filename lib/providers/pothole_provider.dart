@@ -9,8 +9,11 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
   PotholeNotifier() : super([]);
 
   static const _kReportsKey = 'cached_reports_v1';
+  static const _kReportsVirtualCountKey = 'cached_reports_v1_virtual_count';
 
-  int get totalCount => state.length;
+  int _virtualCount = 0;
+
+  int get totalCount => state.length + _virtualCount;
 
   int get last30DaysCount {
     final cutoff = DateTime.now().subtract(const Duration(days: 30));
@@ -25,6 +28,15 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
 
   void addDetection(PotholeDetection detection) {
     state = [...state, detection];
+    saveToPrefs();
+  }
+
+  /// Increment a lightweight local count representing detections that
+  /// should be counted but not stored as full detection objects.
+  void incrementCountBy(int n) {
+    if (n <= 0) return;
+    _virtualCount += n;
+    saveToPrefs();
   }
 
   /// Add multiple detections from a list of detection maps or PotholeDetection
@@ -79,6 +91,7 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
       final prefs = await SharedPreferences.getInstance();
       final list = state.map((e) => e.toJson()).toList();
       await prefs.setString(_kReportsKey, jsonEncode(list));
+      await prefs.setInt(_kReportsVirtualCountKey, _virtualCount);
     } catch (_) {
       // ignore
     }
@@ -100,6 +113,12 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
         }
       }
       if (parsed.isNotEmpty) state = parsed;
+      // load virtual count (default 0)
+      try {
+        _virtualCount = prefs.getInt(_kReportsVirtualCountKey) ?? 0;
+      } catch (_) {
+        _virtualCount = 0;
+      }
     } catch (_) {
       // ignore
     }
@@ -107,6 +126,7 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
 
   void clear() {
     state = [];
+    _virtualCount = 0;
     saveToPrefs();
   }
 }
@@ -117,7 +137,11 @@ final potholeProvider =
     );
 
 final totalCountProvider = Provider<int>((ref) {
-  return ref.watch(potholeProvider).length;
+  // include virtual count when reporting total
+  final list = ref.watch(potholeProvider);
+  // Access the notifier to read private virtual count via exposed totalCount
+  final notifier = ref.read(potholeProvider.notifier);
+  return notifier.totalCount;
 });
 
 final last30DaysCountProvider = Provider<int>((ref) {

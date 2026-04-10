@@ -100,18 +100,32 @@ class AccountService {
         final jsonBody = json.decode(resp.body) as Map<String, dynamic>;
         try {
           final prefs = await SharedPreferences.getInstance();
-          if (jsonBody.containsKey('access')) {
-            await prefs.setString(
-              'access_token',
-              jsonBody['access'].toString(),
-            );
+
+          // normalize access token from multiple possible API shapes
+          String? accessVal;
+          if (jsonBody.containsKey('access'))
+            accessVal = jsonBody['access']?.toString();
+          accessVal ??= jsonBody['access_token']?.toString();
+          accessVal ??= jsonBody['token']?.toString();
+          if (accessVal == null && jsonBody.containsKey('data')) {
+            final d = jsonBody['data'];
+            if (d is Map && d.containsKey('access'))
+              accessVal = d['access']?.toString();
+            accessVal ??= d is Map ? d['access_token']?.toString() : null;
           }
-          if (jsonBody.containsKey('refresh')) {
-            await prefs.setString(
-              'refresh_token',
-              jsonBody['refresh'].toString(),
-            );
+
+          String? refreshVal;
+          if (jsonBody.containsKey('refresh'))
+            refreshVal = jsonBody['refresh']?.toString();
+          refreshVal ??= jsonBody['refresh_token']?.toString();
+
+          if (accessVal != null && accessVal.trim().isNotEmpty) {
+            await prefs.setString('access_token', accessVal.trim());
           }
+          if (refreshVal != null && refreshVal.trim().isNotEmpty) {
+            await prefs.setString('refresh_token', refreshVal.trim());
+          }
+
           // also store raw JSON for later if needed
           await prefs.setString('auth_payload', resp.body);
         } catch (e) {
@@ -153,6 +167,9 @@ class AccountService {
   static const String _logoutUrl =
       'https://pitwatch.onrender.com/api/v1/accounts/admin/logout/';
 
+  static const String _meUrl =
+      'https://pitwatch.onrender.com/api/v1/accounts/me/';
+
   /// Log out by posting the refresh token to the server, then clearing
   /// stored credentials from SharedPreferences. Returns a map with
   /// `success` and `message`.
@@ -167,6 +184,7 @@ class AccountService {
         await prefs.remove('access_token');
         await prefs.remove('refresh_token');
         await prefs.remove('auth_payload');
+        await prefs.remove('user_profile');
         return {'success': true, 'message': 'Logged out locally'};
       }
 
@@ -189,6 +207,7 @@ class AccountService {
       await prefs.remove('access_token');
       await prefs.remove('refresh_token');
       await prefs.remove('auth_payload');
+      await prefs.remove('user_profile');
 
       if (resp.statusCode >= 200 && resp.statusCode < 300) {
         return {'success': true, 'message': 'Logged out'};
@@ -216,7 +235,56 @@ class AccountService {
         await prefs.remove('access_token');
         await prefs.remove('refresh_token');
         await prefs.remove('auth_payload');
+        await prefs.remove('user_profile');
       } catch (_) {}
+      return {'success': false, 'message': 'Network error: $e'};
+    }
+  }
+
+  /// Fetches the current user's profile from the API using the stored
+  /// access token and persists it to SharedPreferences under `user_profile`.
+  /// Returns a map with `success`, optional `data` and `message`.
+  static Future<Map<String, dynamic>> fetchProfile() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final access = prefs.getString('access_token');
+      if (access == null || access.trim().isEmpty) {
+        return {'success': false, 'message': 'No access token available'};
+      }
+
+      final uri = Uri.parse(_meUrl);
+      final headers = {
+        'Accept': 'application/json',
+        'User-Agent': 'pitwatch/1.0',
+        'Authorization': 'Bearer ${access.trim()}',
+      };
+
+      final resp = await http
+          .get(uri, headers: headers)
+          .timeout(const Duration(seconds: 10));
+
+      if (resp.statusCode >= 200 && resp.statusCode < 300) {
+        final jsonBody = json.decode(resp.body);
+        // persist raw JSON so other parts of app can read cached profile
+        try {
+          await prefs.setString('user_profile', resp.body);
+        } catch (_) {}
+        return {'success': true, 'data': jsonBody};
+      }
+
+      try {
+        final decoded = json.decode(resp.body);
+        final msg = decoded is Map && decoded['detail'] != null
+            ? decoded['detail'].toString()
+            : 'Failed to fetch profile (status ${resp.statusCode})';
+        return {'success': false, 'message': msg, 'status': resp.statusCode};
+      } catch (_) {
+        return {
+          'success': false,
+          'message': 'Failed to fetch profile (status ${resp.statusCode})',
+        };
+      }
+    } catch (e) {
       return {'success': false, 'message': 'Network error: $e'};
     }
   }

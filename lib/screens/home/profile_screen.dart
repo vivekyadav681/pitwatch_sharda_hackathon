@@ -1,11 +1,121 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
+import 'dart:convert';
+
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:pitwatch/screens/auth/signup_page.dart';
 import 'package:pitwatch/services/account_service.dart';
 
-class ProfileScreen extends StatelessWidget {
+class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
+
+  @override
+  State<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  String _name = 'User';
+  String _email = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProfile();
+  }
+
+  Future<void> _dumpPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final keys = prefs.getKeys().toList()..sort();
+
+      final buffer = StringBuffer();
+      buffer.writeln('--- SharedPreferences dump start ---');
+
+      for (final k in keys) {
+        final v = prefs.get(k);
+        String valueStr;
+        try {
+          if (v is String) {
+            // try to pretty-print JSON strings
+            final decoded = json.decode(v);
+            valueStr = const JsonEncoder.withIndent('  ').convert(decoded);
+          } else {
+            valueStr = v == null ? 'null' : v.toString();
+          }
+        } catch (_) {
+          valueStr = v == null ? 'null' : v.toString();
+        }
+
+        // Log to console and add a nicely spaced entry to buffer
+        debugPrint('$k: $valueStr');
+        buffer.writeln('$k:');
+        // indent multi-line values for readability
+        for (final line in valueStr.split('\n')) {
+          buffer.writeln('  $line');
+        }
+        buffer.writeln();
+      }
+
+      buffer.writeln('--- SharedPreferences dump end ---');
+      final contentStr = buffer.toString();
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('SharedPreferences dumped to console')),
+      );
+
+      showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('SharedPreferences'),
+          content: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: 400.h, maxWidth: 300.w),
+            child: SingleChildScrollView(
+              child: SelectableText(
+                contentStr.isNotEmpty ? contentStr : '(empty)',
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      debugPrint('Failed to dump prefs: $e');
+    }
+  }
+
+  Future<void> _loadProfile() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('user_profile');
+      if (raw == null || raw.isEmpty) return;
+      final jsonBody = json.decode(raw);
+      if (jsonBody is Map<String, dynamic>) {
+        String name = '';
+        final first = jsonBody['first_name']?.toString();
+        final last = jsonBody['last_name']?.toString();
+        if ((first?.isNotEmpty ?? false) || (last?.isNotEmpty ?? false)) {
+          name = '${first ?? ''} ${last ?? ''}'.trim();
+        } else if (jsonBody['name'] != null) {
+          name = jsonBody['name'].toString();
+        } else if (jsonBody['username'] != null) {
+          name = jsonBody['username'].toString();
+        }
+
+        final email = jsonBody['email']?.toString() ?? '';
+        setState(() {
+          _name = name.isNotEmpty ? name : 'User';
+          _email = email;
+        });
+      }
+    } catch (_) {}
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -47,10 +157,7 @@ class ProfileScreen extends StatelessWidget {
                 Center(
                   child: Transform.translate(
                     offset: Offset(0, 0.h),
-                    child: const InfoBannerCard(
-                      name: 'Mayank Tripathi',
-                      email: 'mayanktripathi7861@gmail.com',
-                    ),
+                    child: InfoBannerCard(name: _name, email: _email),
                   ),
                 ),
 
@@ -118,6 +225,14 @@ class ProfileScreen extends StatelessWidget {
                             (route) => false,
                           );
                         }
+                      },
+                    ),
+                    SizedBox(height: 16.h),
+                    ActionCard(
+                      text: 'Dump SharedPrefs',
+                      icon: Icons.storage_outlined,
+                      onTap: () async {
+                        await _dumpPrefs();
                       },
                     ),
                   ],
