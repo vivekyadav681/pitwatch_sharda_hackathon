@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:pitwatch/models/pothole.dart';
+import 'package:pitwatch/services/report_service.dart';
 
 class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
   PotholeNotifier() : super([]);
@@ -14,15 +15,48 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
 
   int _virtualCount = 0;
   int _serverCount = 0;
+  Map<String, int> _statusCounts = {};
+  bool _countsLoading = false;
 
   int get totalCount => state.length + _virtualCount;
 
   int get serverCount => _serverCount;
 
+  /// Status counts returned from the API (e.g. pending/rejected/resolved)
+  Map<String, int> get statusCounts => Map.unmodifiable(_statusCounts);
+
+  int get statusCountsTotal =>
+      _statusCounts.values.fold<int>(0, (prev, v) => prev + (v ?? 0));
+
+  bool get countsLoading => _countsLoading;
+
   void setServerCount(int c) {
     _serverCount = c;
     // write prefs and notify listeners by re-assigning state (no-op change)
     saveToPrefs();
+    state = [...state];
+  }
+
+  /// Set status counts map and persist.
+  void setStatusCounts(Map<String, int> counts) {
+    _statusCounts = Map<String, int>.from(counts);
+    saveToPrefs();
+    // trigger listeners
+    state = [...state];
+  }
+
+  /// Fetch counts from the API and update provider state. This will set
+  /// `countsLoading` while the network call is in progress.
+  Future<void> fetchAndSetCounts() async {
+    _countsLoading = true;
+    state = [...state];
+    try {
+      final fetched = await ReportService.fetchCounts();
+      if (fetched != null) {
+        setStatusCounts(fetched);
+      }
+    } catch (_) {}
+    _countsLoading = false;
     state = [...state];
   }
 
@@ -182,6 +216,13 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
       await prefs.setString(_kReportsKey, jsonEncode(list));
       await prefs.setInt(_kReportsVirtualCountKey, _virtualCount);
       await prefs.setInt(_kReportsServerCountKey, _serverCount);
+      // save status counts
+      try {
+        await prefs.setString(
+          '${_kReportsKey}_status_counts',
+          jsonEncode(_statusCounts),
+        );
+      } catch (_) {}
     } catch (_) {
       // ignore
     }
@@ -214,6 +255,20 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
       } catch (_) {
         _serverCount = 0;
       }
+      try {
+        final rawCounts = prefs.getString('${_kReportsKey}_status_counts');
+        if (rawCounts != null && rawCounts.isNotEmpty) {
+          final decoded = jsonDecode(rawCounts) as Map<String, dynamic>;
+          _statusCounts = decoded.map(
+            (k, v) => MapEntry(
+              k,
+              (v is num) ? v.toInt() : int.tryParse(v.toString()) ?? 0,
+            ),
+          );
+        }
+      } catch (_) {
+        _statusCounts = {};
+      }
     } catch (_) {
       // ignore
     }
@@ -244,6 +299,24 @@ final totalCountProvider = Provider<int>((ref) {
 final reportsApiCountProvider = Provider<int>((ref) {
   final notifier = ref.watch(potholeProvider.notifier);
   return notifier.serverCount;
+});
+
+/// Provider exposing status counts map (pending/rejected/resolved)
+final reportsStatusCountsProvider = Provider<Map<String, int>>((ref) {
+  final notifier = ref.watch(potholeProvider.notifier);
+  return notifier.statusCounts;
+});
+
+/// Provider exposing total of status counts
+final reportsStatusTotalProvider = Provider<int>((ref) {
+  final notifier = ref.watch(potholeProvider.notifier);
+  return notifier.statusCountsTotal;
+});
+
+/// Provider exposing whether counts are loading
+final reportsCountsLoadingProvider = Provider<bool>((ref) {
+  final notifier = ref.watch(potholeProvider.notifier);
+  return notifier.countsLoading;
 });
 
 final last30DaysCountProvider = Provider<int>((ref) {

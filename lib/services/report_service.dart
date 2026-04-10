@@ -138,6 +138,43 @@ class ReportService {
     }
   }
 
+  /// Fetch aggregated counts for the current user from the counts endpoint.
+  /// Expected response shape: { "rejected": 1, "pending": 1, "resolved": 1 }
+  static Future<Map<String, int>?> fetchCounts() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('access_token');
+
+      final uri = Uri.parse(
+        'https://pitwatch.onrender.com/api/v1/reports/counts/',
+      );
+      final headers = {
+        'Accept': 'application/json',
+        'User-Agent': 'pitwatch/1.0',
+      };
+      if (token != null && token.trim().isNotEmpty) {
+        headers['Authorization'] = 'Bearer ${token.trim()}';
+      }
+
+      final resp = await http
+          .get(uri, headers: headers)
+          .timeout(const Duration(seconds: 10));
+      if (resp.statusCode >= 200 && resp.statusCode < 300) {
+        final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
+        final out = <String, int>{};
+        decoded.forEach((k, v) {
+          try {
+            out[k] = (v is num) ? v.toInt() : int.parse(v.toString());
+          } catch (_) {
+            out[k] = 0;
+          }
+        });
+        return out;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   static Future<String?> _reverseGeocode(double lat, double lon) async {
     try {
       final uri = Uri.parse('$_nominatim&lat=$lat&lon=$lon');

@@ -2,14 +2,50 @@ import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/widgets.dart';
+import 'package:pitwatch/main.dart';
 import 'package:pitwatch/providers/pothole_provider.dart';
 import 'package:pitwatch/screens/session/session_screen.dart';
 
-class HomeScreen extends ConsumerWidget {
+class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen> with RouteAware {
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route != null) {
+      routeObserver.subscribe(this, route);
+    }
+  }
+
+  @override
+  void dispose() {
+    try {
+      routeObserver.unsubscribe(this);
+    } catch (_) {}
+    super.dispose();
+  }
+
+  @override
+  void didPush() {
+    // Screen was pushed onto the navigator — refresh counts
+    ref.read(potholeProvider.notifier).fetchAndSetCounts();
+  }
+
+  @override
+  void didPopNext() {
+    // Returned to this screen from another — refresh counts
+    ref.read(potholeProvider.notifier).fetchAndSetCounts();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFF1F5F9),
       body: SafeArea(
@@ -65,14 +101,60 @@ class HomeScreen extends ConsumerWidget {
                       },
                     ),
                     SizedBox(height: 24.h),
-                    StatsCard(
-                      title: 'Pothole',
-                      value:
-                          (ref.watch(reportsApiCountProvider) > 0
-                                  ? ref.watch(reportsApiCountProvider)
-                                  : ref.watch(totalCountProvider))
-                              .toString(),
-                      subtitle: 'Detected total',
+                    Builder(
+                      builder: (ctx) {
+                        final isLoading = ref.watch(
+                          reportsCountsLoadingProvider,
+                        );
+
+                        if (isLoading) {
+                          return Container(
+                            width: double.infinity,
+                            padding: EdgeInsets.all(16.w),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(16.r),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.25),
+                                  blurRadius: 24.8,
+                                  spreadRadius: -5,
+                                  offset: const Offset(0, 13),
+                                ),
+                              ],
+                            ),
+                            child: Row(
+                              children: [
+                                const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                ),
+                                SizedBox(width: 12.w),
+                                Text(
+                                  'Fetching counts...',
+                                  style: GoogleFonts.inter(fontSize: 16.sp),
+                                ),
+                              ],
+                            ),
+                          );
+                        }
+
+                        final totalReported = ref.watch(
+                          reportsStatusTotalProvider,
+                        );
+                        final displayCount = (totalReported > 0)
+                            ? totalReported
+                            : ref.watch(totalCountProvider);
+
+                        return StatsCard(
+                          title: 'Pothole',
+                          value: displayCount.toString(),
+                          subtitle: 'Detected total',
+                        );
+                      },
                     ),
                     SizedBox(height: 20.h),
                   ],

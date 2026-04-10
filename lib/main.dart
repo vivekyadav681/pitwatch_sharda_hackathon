@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:pitwatch/screens/splash_screen.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+/// Global route observer used by screens that need to know when they become
+/// visible (e.g. to refresh data when the user navigates back to them).
+final RouteObserver<ModalRoute<void>> routeObserver =
+    RouteObserver<ModalRoute<void>>();
 void main() {
   runApp(const ProviderScope(child: MyApp()));
 }
@@ -36,6 +41,7 @@ class MyApp extends StatelessWidget {
               ),
             ),
           ),
+          navigatorObservers: [routeObserver],
           home: const SplashScreen(),
         );
       },

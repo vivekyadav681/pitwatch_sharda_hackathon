@@ -5,6 +5,7 @@ import 'package:pitwatch/screens/home/main_screen.dart';
 import 'dart:async';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:pitwatch/services/token_service.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -37,6 +38,12 @@ class _SplashScreenState extends State<SplashScreen> {
             debugPrint('Failed to dump SharedPreferences: $e');
           }
           final token = prefs.getString('access_token');
+          final refresh = prefs.getString('refresh_token');
+          // Start token auto-refresh if a refresh token exists.
+          if (refresh != null && refresh.trim().isNotEmpty) {
+            TokenService.startAutoRefresh();
+          }
+
           if (token != null && token.trim().isNotEmpty) {
             Navigator.of(context).pushReplacement(
               MaterialPageRoute(builder: (_) => const MainScreen()),

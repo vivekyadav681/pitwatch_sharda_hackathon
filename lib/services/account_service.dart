@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:pitwatch/services/token_service.dart';
 
 class AccountService {
   static const String _signupUrl =
@@ -224,6 +225,11 @@ class AccountService {
       await prefs.remove('refresh_token');
       await prefs.remove('auth_payload');
       await prefs.remove('user_profile');
+
+      // Stop token auto-refresh if running.
+      try {
+        await TokenService.stopAutoRefresh();
+      } catch (_) {}
 
       if (resp.statusCode >= 200 && resp.statusCode < 300) {
         return {'success': true, 'message': 'Logged out'};
