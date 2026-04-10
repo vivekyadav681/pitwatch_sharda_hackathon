@@ -74,9 +74,17 @@ class _DetectionHistoryScreenState
   @override
   void initState() {
     super.initState();
-    // Load reports from remote API and migrate any in-session detections.
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _loadReports();
+    // Migrate any in-session detections into global provider once on first open.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      try {
+        final existing = ref.read(sessionPotholesProvider);
+        if (existing.isNotEmpty) {
+          ref.read(potholeProvider.notifier).addFromMaps(existing);
+        }
+        ref.read(sessionPotholesProvider.notifier).clear();
+      } catch (_) {}
+      // Load persisted reports on first open so the loading spinner can stop.
+      _loadReports();
     });
   }
 
@@ -156,7 +164,7 @@ class _DetectionHistoryScreenState
 
                 SizedBox(height: 8.h),
 
-                // Scrollable list of detections or loader while fetching
+                // Scrollable list of detections or loader while fetching; pull-to-refresh triggers _loadReports
                 Expanded(
                   child: _loading
                       ? Center(
@@ -180,36 +188,42 @@ class _DetectionHistoryScreenState
                                   ],
                                 ),
                               )
-                            : ListView.builder(
-                                padding: EdgeInsets.zero,
-                                itemCount: filtered.length + 1,
-                                itemBuilder: (context, index) {
-                                  if (index < filtered.length) {
-                                    final issue = filtered[index];
+                            : RefreshIndicator(
+                                onRefresh: _loadReports,
+                                color: const Color(0xFF1E3A8A),
+                                child: ListView.builder(
+                                  physics:
+                                      const AlwaysScrollableScrollPhysics(),
+                                  padding: EdgeInsets.zero,
+                                  itemCount: filtered.length + 1,
+                                  itemBuilder: (context, index) {
+                                    if (index < filtered.length) {
+                                      final issue = filtered[index];
+                                      return Padding(
+                                        padding: EdgeInsets.only(bottom: 12.h),
+                                        child: IssueCard(data: issue),
+                                      );
+                                    }
+                                    // footer with counts/spacing
                                     return Padding(
-                                      padding: EdgeInsets.only(bottom: 12.h),
-                                      child: IssueCard(data: issue),
-                                    );
-                                  }
-                                  // footer with counts/spacing
-                                  return Padding(
-                                    padding: EdgeInsets.symmetric(
-                                      vertical: 20.h,
-                                    ),
-                                    child: Column(
-                                      children: [
-                                        Text(
-                                          "Showing ${filtered.length} of ${ref.watch(totalCountProvider)} detections",
-                                          style: GoogleFonts.inter(
-                                            fontSize: 12.sp,
-                                            color: const Color(0xFF64748B),
+                                      padding: EdgeInsets.symmetric(
+                                        vertical: 20.h,
+                                      ),
+                                      child: Column(
+                                        children: [
+                                          Text(
+                                            "Showing ${filtered.length} of ${ref.watch(totalCountProvider)} detections",
+                                            style: GoogleFonts.inter(
+                                              fontSize: 12.sp,
+                                              color: const Color(0xFF64748B),
+                                            ),
                                           ),
-                                        ),
-                                        SizedBox(height: 40.h),
-                                      ],
-                                    ),
-                                  );
-                                },
+                                          SizedBox(height: 40.h),
+                                        ],
+                                      ),
+                                    );
+                                  },
+                                ),
                               )),
                 ),
               ],

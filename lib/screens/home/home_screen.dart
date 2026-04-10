@@ -27,12 +27,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> with RouteAware {
   @override
   void initState() {
     super.initState();
-    // Fetch counts when this screen is first created (covers PageView use).
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      try {
-        ref.read(potholeProvider.notifier).fetchAndSetCounts();
-      } catch (_) {}
-    });
+    // No-op: counts are prefetched on the splash screen and stored in the
+    // provider. Avoid refetching here to prevent showing a loader on the
+    // Home screen.
   }
 
   @override
@@ -45,18 +42,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> with RouteAware {
 
   @override
   void didPush() {
-    // Screen was pushed onto the navigator — refresh counts
-    ref.read(potholeProvider.notifier).fetchAndSetCounts();
+    // Do not refresh counts here; rely on provider state populated at app start.
   }
 
   @override
   void didPopNext() {
-    // Returned to this screen from another — refresh counts
-    ref.read(potholeProvider.notifier).fetchAndSetCounts();
+    // Returned to this screen from another — do not refetch counts here.
   }
 
   @override
   Widget build(BuildContext context) {
+    // Read counts from providers once and reuse in the UI
+    final last30 = ref.watch(last30DaysCountProvider);
+    final localTotal = ref.watch(totalCountProvider);
+    final displayCount = localTotal;
+
     return Scaffold(
       backgroundColor: const Color(0xFFF1F5F9),
       body: SafeArea(
@@ -100,7 +100,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> with RouteAware {
                       ),
                     ),
                     SizedBox(height: 24.h),
-                    PotholeCard(count: ref.watch(last30DaysCountProvider)),
+                    PotholeCard(count: last30),
                     SizedBox(height: 24.h),
                     StartMonitoringButton(
                       onTap: () {
@@ -112,60 +112,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> with RouteAware {
                       },
                     ),
                     SizedBox(height: 24.h),
-                    Builder(
-                      builder: (ctx) {
-                        final isLoading = ref.watch(
-                          reportsCountsLoadingProvider,
-                        );
-
-                        if (isLoading) {
-                          return Container(
-                            width: double.infinity,
-                            padding: EdgeInsets.all(16.w),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(16.r),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.25),
-                                  blurRadius: 24.8,
-                                  spreadRadius: -5,
-                                  offset: const Offset(0, 13),
-                                ),
-                              ],
-                            ),
-                            child: Row(
-                              children: [
-                                const SizedBox(
-                                  width: 20,
-                                  height: 20,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                ),
-                                SizedBox(width: 12.w),
-                                Text(
-                                  'Fetching counts...',
-                                  style: GoogleFonts.inter(fontSize: 16.sp),
-                                ),
-                              ],
-                            ),
-                          );
-                        }
-
-                        final totalReported = ref.watch(
-                          reportsStatusTotalProvider,
-                        );
-                        final displayCount = (totalReported > 0)
-                            ? totalReported
-                            : ref.watch(totalCountProvider);
-
-                        return StatsCard(
-                          title: 'Pothole',
-                          value: displayCount.toString(),
-                          subtitle: 'Detected total',
-                        );
-                      },
+                    StatsCard(
+                      title: 'Pothole',
+                      value: displayCount.toString(),
+                      subtitle: 'Detected total',
                     ),
                     SizedBox(height: 20.h),
                   ],

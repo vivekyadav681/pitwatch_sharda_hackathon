@@ -4,22 +4,22 @@ import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
-import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:geolocator/geolocator.dart';
-import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
+import 'package:tflite_flutter/tflite_flutter.dart';
+import 'package:pitwatch/screens/session/inference_worker.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:tflite_flutter/tflite_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:pitwatch/models/pothole.dart';
 import 'package:pitwatch/providers/pothole_provider.dart';
-import 'sessionCompleteScreen.dart';
+import 'package:pitwatch/screens/session/sessionCompleteScreen.dart';
 
 class SessionScreen extends ConsumerStatefulWidget {
   final Duration? sessionDuration;
-
-  const SessionScreen({super.key, this.sessionDuration});
+  const SessionScreen({Key? key, this.sessionDuration}) : super(key: key);
 
   @override
   ConsumerState<SessionScreen> createState() => _SessionScreenState();
@@ -28,111 +28,35 @@ class SessionScreen extends ConsumerStatefulWidget {
 class _SessionScreenState extends ConsumerState<SessionScreen> {
   CameraController? _controller;
   Future<void>? _initializeFuture;
-  Timer? _periodicTimer;
-  Timer? _sessionTimer;
-  Timer? _uiUpdateTimer;
-
-  DateTime? _sessionStart;
-  Position? _sessionStartPosition;
-  Position? _sessionEndPosition;
-
-  Interpreter? _interpreter;
-  late List<int> _inputShape;
-  late TensorType _inputType;
-  List<String> _labels = [];
   bool _modelLoaded = false;
-  bool _isProcessing = false;
-
-  List<PotholeDetection> _sessionDetections = [];
-  static const double _detectionThreshold = 0.9;
+  Interpreter? _interpreter;
+  DateTime? _sessionStart;
   int _hazardsCount = 0;
-  bool _sessionEnded = false;
-
+  List<PotholeDetection> _sessionDetections = [];
+  Position? _sessionStartPosition;
+  Timer? _periodicTimer;
+  Timer? _uiUpdateTimer;
+  Timer? _sessionTimer;
   bool _hasLocationPermissionCached = false;
+  bool _deniedForeverNotified = false;
   Position? _lastKnownPosition;
   DateTime? _lastPositionTimestamp;
-  final int _positionCacheSeconds = 5;
-  bool _deniedForeverNotified = false;
+  final int _positionCacheSeconds = 15;
+  List<int> _inputShape = [1, 640, 640, 3];
+  TensorType? _inputType;
+  List<String> _labels = [];
+  double _detectionThreshold = 0.9;
+  bool _isProcessing = false;
+  final List<String> _pendingFiles = [];
+  final List<Future> _processingTasks = [];
+  InferenceWorker? _inferenceWorker;
 
   @override
   void initState() {
     super.initState();
-    _initCameraAndModel();
-  }
-
-  void _stopMonitoring() {
-    _endSession();
-  }
-
-  Future<void> _endSession() async {
-    if (_sessionEnded) return;
-    _sessionEnded = true;
-
-    _periodicTimer?.cancel();
-    _sessionTimer?.cancel();
-    _uiUpdateTimer?.cancel();
-
-    if (!mounted) return;
-
-    final hazards = ref.read(sessionPotholesProvider).length;
-    final durationMinutes = _sessionStart == null
-        ? 0
-        : DateTime.now().difference(_sessionStart!).inMinutes;
-
-    double km = 0.0;
-    try {
-      if (_sessionStartPosition != null) {
-        try {
-          _sessionEndPosition = await Geolocator.getCurrentPosition(
-            desiredAccuracy: LocationAccuracy.high,
-          );
-        } catch (_) {}
-      }
-
-      if (_sessionStartPosition != null && _sessionEndPosition != null) {
-        final distance = Distance();
-        final meters = distance.as(
-          LengthUnit.Meter,
-          LatLng(
-            _sessionStartPosition!.latitude,
-            _sessionStartPosition!.longitude,
-          ),
-          LatLng(_sessionEndPosition!.latitude, _sessionEndPosition!.longitude),
-        );
-        km = meters / 1000.0;
-      } else if (_sessionDetections.length > 1) {
-        final distance = Distance();
-        double meters = 0.0;
-        for (var i = 1; i < _sessionDetections.length; i++) {
-          final prev = _sessionDetections[i - 1];
-          final cur = _sessionDetections[i];
-          meters += distance.as(
-            LengthUnit.Meter,
-            LatLng(prev.latitude, prev.longitude),
-            LatLng(cur.latitude, cur.longitude),
-          );
-        }
-        km = meters / 1000.0;
-      }
-    } catch (_) {}
-
-    try {
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) => SessionCompleteScreen(
-            detections: ref.read(sessionPotholesProvider),
-            hazards: hazards,
-            durationMinutes: durationMinutes,
-            kilometers: km,
-          ),
-        ),
-      );
-    } catch (_) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Monitoring stopped')));
-      Navigator.of(context).pop();
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initCameraAndModel();
+    });
   }
 
   Future<void> _initCameraAndModel() async {
@@ -175,10 +99,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           } catch (_) {}
         }
 
-        _captureAndRun();
+        _captureAndQueue();
         _periodicTimer = Timer.periodic(
           const Duration(seconds: 5),
-          (_) => _captureAndRun(),
+          (_) => _captureAndQueue(),
         );
         _uiUpdateTimer = Timer.periodic(const Duration(seconds: 1), (_) {
           if (mounted) setState(() {});
@@ -190,7 +114,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       }
 
       if (mounted) setState(() {});
-    } catch (_) {
+    } catch (e) {
+      debugPrint('init camera/model error: $e');
       _modelLoaded = false;
     }
   }
@@ -254,7 +179,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   Future<void> _loadModel() async {
     try {
       _interpreter = await Interpreter.fromAsset(
-        'assets/model/best_float32.tflite',
+        'assets/model/best_float32(1).tflite',
       );
       _interpreter!.allocateTensors();
 
@@ -274,7 +199,23 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           .toList();
 
       _modelLoaded = true;
-    } catch (_) {
+
+      // Start inference worker isolate with model bytes for off-main-thread inference.
+      try {
+        final bd = await rootBundle.load('assets/model/best_float32.tflite');
+        final modelBytes = bd.buffer.asUint8List();
+        _inferenceWorker = InferenceWorker();
+        await _inferenceWorker!.start(
+          modelBytes,
+          _inputShape,
+          _inputType?.index ?? TensorType.float32.index,
+        );
+      } catch (e) {
+        debugPrint('inference worker start failed: $e');
+        _inferenceWorker = null;
+      }
+    } catch (e) {
+      debugPrint('model load error: $e');
       _modelLoaded = false;
     }
   }
@@ -302,154 +243,240 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     _uiUpdateTimer?.cancel();
     _interpreter?.close();
     _controller?.dispose();
+    _inferenceWorker?.stop();
     super.dispose();
   }
 
-  Future<void> _captureAndRun() async {
+  /// Capture one image and queue it for background processing.
+  Future<void> _captureAndQueue() async {
     if (!mounted) return;
     if (_controller == null || !_controller!.value.isInitialized) return;
     if (!_modelLoaded || _interpreter == null) return;
-    if (_isProcessing) return;
     if (_controller!.value.isTakingPicture) return;
-
-    _isProcessing = true;
 
     try {
       final XFile file = await _controller!.takePicture();
-      final bytes = await file.readAsBytes();
-      final image = img.decodeImage(bytes);
-      if (image == null) return;
 
-      final int inH = _inputShape[1];
-      final int inW = _inputShape[2];
-      final int inC = _inputShape[3];
+      // immediately persist path and increment hazard count for responsive UX
+      _pendingFiles.add(file.path);
+      setState(() {
+        _hazardsCount++;
+      });
 
-      final resized = img.copyResize(image, width: inW, height: inH);
+      final task = _processImageFile(file.path).whenComplete(() {
+        _pendingFiles.remove(file.path);
+      });
 
-      dynamic input;
-      if (_inputType == TensorType.uint8 || _inputType == TensorType.int8) {
-        input = List.generate(
-          1,
-          (_) => List.generate(
-            inH,
-            (_) => List.generate(inW, (_) => List.filled(inC, 0)),
-          ),
-        );
-        for (int y = 0; y < inH; y++) {
-          for (int x = 0; x < inW; x++) {
-            final p = resized.getPixel(x, y);
-            input[0][y][x][0] = img.getRed(p);
-            if (inC > 1) input[0][y][x][1] = img.getGreen(p);
-            if (inC > 2) input[0][y][x][2] = img.getBlue(p);
+      _processingTasks.add(task);
+
+      task.whenComplete(() {
+        _processingTasks.remove(task);
+      });
+    } catch (e) {
+      debugPrint('capture error: $e');
+    }
+  }
+
+  Future<void> _processImageFile(String path) async {
+    try {
+      final f = File(path);
+      if (!await f.exists()) return;
+
+      double score = 0.0;
+      String label = 'unknown';
+
+      if (_inferenceWorker != null && _inferenceWorker!.isRunning) {
+        try {
+          final res = await _inferenceWorker!.runInference(path);
+          if (res.containsKey('error')) {
+            debugPrint('worker error: ${res['error']}');
           }
+          score = (res['score'] as num?)?.toDouble() ?? 0.0;
+          final li = res['labelIndex'] as int? ?? -1;
+          label = (li >= 0 && li < _labels.length)
+              ? _labels[li]
+              : (res['label'] as String? ?? 'unknown');
+        } catch (e) {
+          debugPrint('worker inference failed, falling back: $e');
+          final fb = await _inferOnMainThread(path);
+          score = fb['score'] as double;
+          label = fb['label'] as String;
         }
       } else {
-        input = List.generate(
-          1,
-          (_) => List.generate(
-            inH,
-            (_) => List.generate(inW, (_) => List.filled(inC, 0.0)),
-          ),
-        );
-        for (int y = 0; y < inH; y++) {
-          for (int x = 0; x < inW; x++) {
-            final p = resized.getPixel(x, y);
-            input[0][y][x][0] = (img.getRed(p) - 127.5) / 127.5;
-            if (inC > 1) input[0][y][x][1] = (img.getGreen(p) - 127.5) / 127.5;
-            if (inC > 2) input[0][y][x][2] = (img.getBlue(p) - 127.5) / 127.5;
-          }
-        }
+        final fb = await _inferOnMainThread(path);
+        score = fb['score'] as double;
+        label = fb['label'] as String;
       }
 
-      final outTensor = _interpreter!.getOutputTensor(0);
-      final outShape = outTensor.shape;
-      final outType = outTensor.type;
-
-      List<double> flat;
-      if (outShape.length == 2 && outShape[0] == 1) {
-        final outSize = outShape[1];
-        final output = List<double>.filled(outSize, 0.0);
-        _interpreter!.run(input, output);
-        flat = output;
-      } else {
-        final outputObj = _makeZeroList(outShape, outType);
-        _interpreter!.run(input, outputObj);
-        flat = _flattenToDoubleList(outputObj);
-      }
-
-      int topIndex = 0;
-      double topScore = -double.infinity;
-      for (int i = 0; i < flat.length; i++) {
-        if (flat[i] > topScore) {
-          topScore = flat[i];
-          topIndex = i;
-        }
-      }
-
-      final label = topIndex < _labels.length
-          ? _labels[topIndex]
-          : 'Label $topIndex';
-
-      if (topScore > _detectionThreshold) {
-        if (mounted) {
+      // Show model output in realtime as a SnackBar for quick feedback.
+      if (mounted) {
+        try {
+          final pct = (score * 100).toStringAsFixed(0);
+          final message = '${label} (${pct}%)';
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(
-                'Pothole detected (${topScore.toStringAsFixed(2)})',
-              ),
+              content: Text(message),
               duration: const Duration(seconds: 2),
+              behavior: SnackBarBehavior.floating,
             ),
           );
-        }
-
-        final hasPermission = await _ensureLocationPermission();
-        if (hasPermission) {
-          final pos = await _getCachedOrFreshPosition();
-          if (pos == null) return;
-
-          String titleFromOsm = '';
-          try {
-            final place = await _reverseGeocode(pos.latitude, pos.longitude);
-            if (place != null && place.trim().isNotEmpty) {
-              titleFromOsm = place;
-            }
-          } catch (_) {}
-
-          final detection = PotholeDetection(
-            id: DateTime.now().millisecondsSinceEpoch,
-            title: titleFromOsm.isNotEmpty ? titleFromOsm : label,
-            description:
-                'Detected by model (score ${topScore.toStringAsFixed(2)})',
-            status: PotholeStatus.pending,
-            latitude: pos.latitude,
-            longitude: pos.longitude,
-            createdAt: DateTime.now().toIso8601String(),
-          );
-
-          setState(() {
-            _sessionDetections.add(detection);
-            _hazardsCount++;
-          });
-
-          try {
-            ref.read(sessionPotholesProvider.notifier).add(detection.toJson());
-          } catch (_) {}
-
-          await _saveDetection(detection.toJson());
-        }
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('$label (${topScore.toStringAsFixed(2)})'),
-              duration: const Duration(seconds: 2),
-            ),
-          );
+        } catch (e) {
+          debugPrint('show snackbar error: $e');
         }
       }
-    } catch (_) {
+
+      await _handleDetectionIfNeeded(score, label);
+    } catch (e) {
+      debugPrint('process image error: $e');
     } finally {
-      _isProcessing = false;
+      // delete the file after processing to free space
+      try {
+        final f = File(path);
+        if (await f.exists()) await f.delete();
+      } catch (_) {}
+    }
+  }
+
+  Future<Map<String, Object>> _inferOnMainThread(String path) async {
+    try {
+      final f = File(path);
+      if (!await f.exists()) return {'score': 0.0, 'label': 'unknown'};
+      final bytes = await f.readAsBytes();
+      final image = img.decodeImage(bytes);
+      if (image == null) return {'score': 0.0, 'label': 'unknown'};
+
+      double score = 0.0;
+      String label = 'unknown';
+
+      if (_interpreter != null && _inputType != null) {
+        final resized = img.copyResize(
+          image,
+          width: _inputShape[2],
+          height: _inputShape[1],
+        );
+        final inH = _inputShape[1];
+        final inW = _inputShape[2];
+        final inC = _inputShape[3];
+
+        dynamic input;
+        if (_inputType == TensorType.uint8 || _inputType == TensorType.int8) {
+          input = List.generate(
+            1,
+            (_) => List.generate(
+              inH,
+              (_) => List.generate(inW, (_) => List.filled(inC, 0)),
+            ),
+          );
+          for (int y = 0; y < inH; y++) {
+            for (int x = 0; x < inW; x++) {
+              final p = resized.getPixel(x, y);
+              input[0][y][x][0] = img.getRed(p);
+              if (inC > 1) input[0][y][x][1] = img.getGreen(p);
+              if (inC > 2) input[0][y][x][2] = img.getBlue(p);
+            }
+          }
+        } else {
+          input = List.generate(
+            1,
+            (_) => List.generate(
+              inH,
+              (_) => List.generate(inW, (_) => List.filled(inC, 0.0)),
+            ),
+          );
+          for (int y = 0; y < inH; y++) {
+            for (int x = 0; x < inW; x++) {
+              final p = resized.getPixel(x, y);
+              input[0][y][x][0] = (img.getRed(p) - 127.5) / 127.5;
+              if (inC > 1)
+                input[0][y][x][1] = (img.getGreen(p) - 127.5) / 127.5;
+              if (inC > 2) input[0][y][x][2] = (img.getBlue(p) - 127.5) / 127.5;
+            }
+          }
+        }
+
+        try {
+          final outTensor = _interpreter!.getOutputTensor(0);
+          final outShape = outTensor.shape;
+          List<double> flat;
+          if (outShape.length == 2 && outShape[0] == 1) {
+            final outSize = outShape[1];
+            final output = List<double>.filled(outSize, 0.0);
+            _interpreter!.run(input, output);
+            flat = output;
+          } else {
+            final outputObj = _makeZeroList(outShape, outTensor.type);
+            _interpreter!.run(input, outputObj);
+            flat = _flattenToDoubleList(outputObj);
+          }
+
+          int topIndex = 0;
+          double topScore = -double.infinity;
+          for (int i = 0; i < flat.length; i++) {
+            if (flat[i] > topScore) {
+              topScore = flat[i];
+              topIndex = i;
+            }
+          }
+          score = topScore;
+          label = topIndex < _labels.length
+              ? _labels[topIndex]
+              : 'label_$topIndex';
+        } catch (e) {
+          debugPrint('model run error: $e');
+        }
+      } else {
+        int dark = 0;
+        for (int y = 0; y < image.height; y += 10) {
+          for (int x = 0; x < image.width; x += 10) {
+            final p = image.getPixel(x, y);
+            final avg = (img.getRed(p) + img.getGreen(p) + img.getBlue(p)) / 3;
+            if (avg < 100) dark++;
+          }
+        }
+        score = (dark > 10) ? 0.95 : 0.2;
+        label = 'pothole';
+      }
+
+      return {'score': score, 'label': label};
+    } catch (e) {
+      debugPrint('infer main thread error: $e');
+      return {'score': 0.0, 'label': 'unknown'};
+    }
+  }
+
+  Future<void> _handleDetectionIfNeeded(double score, String label) async {
+    if (score > _detectionThreshold) {
+      final hasPermission = await _ensureLocationPermission();
+      if (!hasPermission) return;
+      final pos = await _getCachedOrFreshPosition();
+      if (pos == null) return;
+
+      String titleFromOsm = '';
+      try {
+        final place = await _reverseGeocode(pos.latitude, pos.longitude);
+        if (place != null && place.trim().isNotEmpty) titleFromOsm = place;
+      } catch (_) {}
+
+      final detection = PotholeDetection(
+        id: DateTime.now().millisecondsSinceEpoch,
+        title: titleFromOsm.isNotEmpty ? titleFromOsm : label,
+        description: 'Detected by model (score ${score.toStringAsFixed(2)})',
+        status: PotholeStatus.pending,
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        createdAt: DateTime.now().toIso8601String(),
+      );
+
+      setState(() {
+        _sessionDetections.add(detection);
+      });
+
+      try {
+        ref.read(sessionPotholesProvider.notifier).add(detection.toJson());
+      } catch (_) {}
+
+      await _saveDetection(detection.toJson());
     }
   }
 
@@ -466,12 +493,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             },
           )
           .timeout(const Duration(seconds: 10));
-
       if (resp.statusCode == 200) {
         final data = json.decode(resp.body) as Map<String, dynamic>;
         final display = data['display_name'] as String?;
         if (display != null && display.trim().isNotEmpty) return display;
-
         final address = data['address'] as Map<String, dynamic>?;
         if (address != null) {
           final parts = <String>[];
@@ -525,6 +550,64 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     return '$minutes:$seconds';
   }
 
+  void _endSession() {
+    // ensure we only end once
+    if (!mounted) return;
+    // wait for processing tasks to finish, then navigate
+    if (_processingTasks.isNotEmpty) {
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => const Center(child: CircularProgressIndicator()),
+      );
+      Future.wait(_processingTasks).whenComplete(() {
+        if (mounted) Navigator.of(context).pop();
+        _navigateToComplete();
+      });
+    } else {
+      _navigateToComplete();
+    }
+  }
+
+  void _navigateToComplete() {
+    try {
+      final hazards = _hazardsCount;
+      final durationMinutes = _sessionStart == null
+          ? 0
+          : DateTime.now().difference(_sessionStart!).inMinutes;
+      double km = 0.0;
+      try {
+        // best-effort compute kilometers if we have positions
+        if (_sessionStartPosition != null && _lastKnownPosition != null) {
+          final prev = _sessionStartPosition!;
+          final cur = _lastKnownPosition!;
+          final meters = Distance().as(
+            LengthUnit.Meter,
+            LatLng(prev.latitude, prev.longitude),
+            LatLng(cur.latitude, cur.longitude),
+          );
+          km = meters / 1000.0;
+        }
+      } catch (_) {}
+
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => SessionCompleteScreen(
+            detections: ref.read(sessionPotholesProvider),
+            hazards: hazards,
+            durationMinutes: durationMinutes,
+            kilometers: km,
+          ),
+        ),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Monitoring stopped')));
+      Navigator.of(context).pop();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final durationStr = _formatDuration();
@@ -570,7 +653,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   GestureDetector(
-                    onTap: _stopMonitoring,
+                    onTap: _endSession,
                     child: Container(
                       width: 72.w,
                       height: 72.w,

@@ -1,7 +1,6 @@
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:pitwatch/models/pothole.dart';
 import 'package:pitwatch/services/report_service.dart';
@@ -10,56 +9,57 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
   PotholeNotifier() : super([]);
 
   static const _kReportsKey = 'cached_reports_v1';
-  static const _kReportsVirtualCountKey = 'cached_reports_v1_virtual_count';
-  static const _kReportsServerCountKey = 'cached_reports_v1_server_count';
+  // Session-only detections (maps) collected during an active session.
+  final List<Map<String, dynamic>> _sessionDetections = [];
 
-  int _virtualCount = 0;
-  int _serverCount = 0;
-  Map<String, int> _statusCounts = {};
-  bool _countsLoading = false;
+  /// Total detections stored in the provider (persistent cache) or
+  /// a server-provided total if available. When `_totalCount` is null the
+  /// provider falls back to the local list length.
+  int get totalCount => _totalCount ?? state.length;
 
-  int get totalCount => state.length + _virtualCount;
+  /// Number of detections captured in the current session
+  int get sessionCount => _sessionDetections.length;
 
-  int get serverCount => _serverCount;
+  /// Expose session detections as an immutable list
+  List<Map<String, dynamic>> get sessionDetections =>
+      List.unmodifiable(_sessionDetections);
 
-  /// Status counts returned from the API (e.g. pending/rejected/resolved)
-  Map<String, int> get statusCounts => Map.unmodifiable(_statusCounts);
-
-  int get statusCountsTotal =>
-      _statusCounts.values.fold<int>(0, (prev, v) => prev + (v ?? 0));
-
-  bool get countsLoading => _countsLoading;
-
-  void setServerCount(int c) {
-    _serverCount = c;
-    // write prefs and notify listeners by re-assigning state (no-op change)
+  /// Add a persisted detection to the global list (avoids duplicates by id)
+  void addDetection(PotholeDetection detection) {
+    final exists = state.any((d) => d.id == detection.id);
+    if (exists) return;
+    state = [...state, detection];
     saveToPrefs();
+  }
+
+  /// Add a detection map to the current session (not persisted)
+  void addSessionDetection(Map<String, dynamic> detection) {
+    _sessionDetections.add(detection);
+    // notify listeners by reassigning state (no-op change to persisted list)
     state = [...state];
   }
 
-  /// Set status counts map and persist.
-  void setStatusCounts(Map<String, int> counts) {
-    _statusCounts = Map<String, int>.from(counts);
-    saveToPrefs();
-    // trigger listeners
-    state = [...state];
-  }
-
-  /// Fetch counts from the API and update provider state. This will set
-  /// `countsLoading` while the network call is in progress.
-  Future<void> fetchAndSetCounts() async {
-    _countsLoading = true;
-    state = [...state];
-    try {
-      final res = await ReportService.fetchCounts();
-      if (res['ok'] == true && res['data'] is Map<String, int>) {
-        setStatusCounts(Map<String, int>.from(res['data']));
-      } else {
-        // on error, clear counts and optionally persist empty map
-        setStatusCounts({});
+  /// Merge session detections into the persisted list, converting maps
+  /// to `PotholeDetection` and deduplicating by id.
+  Future<void> mergeSessionIntoState() async {
+    final existingIds = state.map((e) => e.id).toSet();
+    final parsed = <PotholeDetection>[];
+    for (final raw in _sessionDetections) {
+      try {
+        final m = Map<String, dynamic>.from(raw);
+        final candidate = PotholeDetection.fromJson(m);
+        if (existingIds.contains(candidate.id)) continue;
+        parsed.add(candidate);
+        existingIds.add(candidate.id);
+      } catch (_) {
+        // skip malformed session item
       }
-    } catch (_) {}
-    _countsLoading = false;
+    }
+    if (parsed.isNotEmpty) {
+      state = [...state, ...parsed];
+      await saveToPrefs();
+    }
+    _sessionDetections.clear();
     state = [...state];
   }
 
@@ -74,21 +74,50 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
     }).length;
   }
 
-  void addDetection(PotholeDetection detection) {
-    // Avoid adding duplicate by `id`.
-    final exists = state.any((d) => d.id == detection.id);
-    if (exists) return;
-    state = [...state, detection];
-    saveToPrefs();
-  }
-
-  /// Increment a lightweight local count representing detections that
-  /// should be counted but not stored as full detection objects.
+  // Compatibility shims for older callers -----------------------------------------------------------------
+  /// Increment a lightweight local count (kept as a no-op shim).
   void incrementCountBy(int n) {
     if (n <= 0) return;
-    _virtualCount += n;
-    saveToPrefs();
+    // no-op for simplified provider; trigger listeners
+    state = [...state];
   }
+
+  // Backing field for a server-provided total count. When zero, fall back
+  // to using `state.length`.
+  int? _totalCount;
+  bool _countsLoading = false;
+
+  /// Set a single server-provided total count.
+  void setServerCount(int c) {
+    _totalCount = c;
+    state = [...state];
+  }
+
+  bool get countsLoading => _countsLoading;
+
+  /// Fetch counts from server and update the single total count value.
+  Future<void> fetchAndSetCounts() async {
+    _countsLoading = true;
+    state = [...state];
+    try {
+      final res = await ReportService.fetchCounts();
+      if (res['ok'] == true && res['counts'] is Map<String, dynamic>) {
+        final raw = res['counts'] as Map<String, dynamic>;
+        var total = 0;
+        raw.forEach((k, v) {
+          if (v is num)
+            total += v.toInt();
+          else if (v is String)
+            total += int.tryParse(v) ?? 0;
+        });
+        setServerCount(total);
+      }
+    } catch (_) {}
+    _countsLoading = false;
+    state = [...state];
+  }
+
+  /// (removed) virtual count functionality; use session detections instead.
 
   /// Add multiple detections from a list of detection maps or PotholeDetection
   /// objects. Maps will be converted using `PotholeDetection.fromJson`.
@@ -184,12 +213,14 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
 
   /// Fetch reports from the remote API and replace current state with
   /// the fetched detections. If the request fails the state is unchanged.
-  Future<void> fetchReports() async {
+  Future<void> fetchReports({int page = 1, int pageSize = 1000}) async {
     try {
-      final uri = Uri.parse('https://pitwatch.onrender.com/api/v1/reports/');
-      final resp = await http.get(uri);
-      if (resp.statusCode == 200) {
-        final jsonBody = jsonDecode(resp.body) as Map<String, dynamic>;
+      final res = await ReportService.fetchReports(
+        page: page,
+        pageSize: pageSize,
+      );
+      if (res['ok'] == true && res['data'] is Map<String, dynamic>) {
+        final jsonBody = res['data'] as Map<String, dynamic>;
         final results = jsonBody['results'] as List<dynamic>? ?? [];
         final parsed = <PotholeDetection>[];
         for (final item in results) {
@@ -203,6 +234,8 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
         }
         // Replace current detections with fetched ones
         state = parsed;
+        // Use the fetched list length as the authoritative total count.
+        setServerCount(parsed.length);
         // cache to prefs
         await saveToPrefs();
       }
@@ -217,15 +250,7 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
       final prefs = await SharedPreferences.getInstance();
       final list = state.map((e) => e.toJson()).toList();
       await prefs.setString(_kReportsKey, jsonEncode(list));
-      await prefs.setInt(_kReportsVirtualCountKey, _virtualCount);
-      await prefs.setInt(_kReportsServerCountKey, _serverCount);
-      // save status counts
-      try {
-        await prefs.setString(
-          '${_kReportsKey}_status_counts',
-          jsonEncode(_statusCounts),
-        );
-      } catch (_) {}
+      // keep persistence minimal: only cached reports
     } catch (_) {
       // ignore
     }
@@ -247,31 +272,7 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
         }
       }
       if (parsed.isNotEmpty) state = parsed;
-      // load virtual count (default 0)
-      try {
-        _virtualCount = prefs.getInt(_kReportsVirtualCountKey) ?? 0;
-      } catch (_) {
-        _virtualCount = 0;
-      }
-      try {
-        _serverCount = prefs.getInt(_kReportsServerCountKey) ?? 0;
-      } catch (_) {
-        _serverCount = 0;
-      }
-      try {
-        final rawCounts = prefs.getString('${_kReportsKey}_status_counts');
-        if (rawCounts != null && rawCounts.isNotEmpty) {
-          final decoded = jsonDecode(rawCounts) as Map<String, dynamic>;
-          _statusCounts = decoded.map(
-            (k, v) => MapEntry(
-              k,
-              (v is num) ? v.toInt() : int.tryParse(v.toString()) ?? 0,
-            ),
-          );
-        }
-      } catch (_) {
-        _statusCounts = {};
-      }
+      // session detections start empty
     } catch (_) {
       // ignore
     }
@@ -279,8 +280,7 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
 
   void clear() {
     state = [];
-    _virtualCount = 0;
-    _serverCount = 0;
+    _sessionDetections.clear();
     saveToPrefs();
   }
 }
@@ -290,38 +290,25 @@ final potholeProvider =
       (ref) => PotholeNotifier(),
     );
 
-final totalCountProvider = Provider<int>((ref) {
-  // include virtual count when reporting total
-  final list = ref.watch(potholeProvider);
-  // Access the notifier to read private virtual count via exposed totalCount
-  final notifier = ref.read(potholeProvider.notifier);
+/// Total persisted detections
+final totalDetectionsProvider = Provider<int>((ref) {
+  final notifier = ref.watch(potholeProvider.notifier);
   return notifier.totalCount;
 });
 
-/// Server-provided total reports count (from API `count` field)
-final reportsApiCountProvider = Provider<int>((ref) {
+/// Count of detections captured in the current session
+final sessionCountProvider = Provider<int>((ref) {
   final notifier = ref.watch(potholeProvider.notifier);
-  return notifier.serverCount;
+  return notifier.sessionCount;
 });
 
-/// Provider exposing status counts map (pending/rejected/resolved)
-final reportsStatusCountsProvider = Provider<Map<String, int>>((ref) {
+/// Session detections as maps
+final sessionDetectionsProvider = Provider<List<Map<String, dynamic>>>((ref) {
   final notifier = ref.watch(potholeProvider.notifier);
-  return notifier.statusCounts;
+  return notifier.sessionDetections;
 });
 
-/// Provider exposing total of status counts
-final reportsStatusTotalProvider = Provider<int>((ref) {
-  final notifier = ref.watch(potholeProvider.notifier);
-  return notifier.statusCountsTotal;
-});
-
-/// Provider exposing whether counts are loading
-final reportsCountsLoadingProvider = Provider<bool>((ref) {
-  final notifier = ref.watch(potholeProvider.notifier);
-  return notifier.countsLoading;
-});
-
+/// Helper: last 30 days from persisted detections
 final last30DaysCountProvider = Provider<int>((ref) {
   final list = ref.watch(potholeProvider);
   final cutoff = DateTime.now().subtract(const Duration(days: 30));
@@ -334,7 +321,7 @@ final last30DaysCountProvider = Provider<int>((ref) {
   }).length;
 });
 
-// Session-level potholes: stores full detection maps for the current session
+// Compatibility providers and session-level notifier (kept for existing UI code)
 class SessionPotholesNotifier
     extends StateNotifier<List<Map<String, dynamic>>> {
   SessionPotholesNotifier() : super([]);
@@ -357,4 +344,26 @@ final sessionPotholesProvider =
 
 final sessionPotholesCountProvider = Provider<int>((ref) {
   return ref.watch(sessionPotholesProvider).length;
+});
+
+/// Backwards-compatible total count provider
+final totalCountProvider = Provider<int>((ref) {
+  final notifier = ref.watch(potholeProvider.notifier);
+  return notifier.totalCount;
+});
+
+/// Approximation for server-provided count (legacy name)
+final reportsApiCountProvider = Provider<int>((ref) {
+  final notifier = ref.watch(potholeProvider.notifier);
+  return notifier.totalCount;
+});
+
+final reportsStatusTotalProvider = Provider<int>((ref) {
+  final notifier = ref.watch(potholeProvider.notifier);
+  return notifier.totalCount;
+});
+
+final reportsCountsLoadingProvider = Provider<bool>((ref) {
+  final notifier = ref.watch(potholeProvider.notifier);
+  return notifier.countsLoading;
 });

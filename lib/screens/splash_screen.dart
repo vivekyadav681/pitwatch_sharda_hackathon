@@ -6,15 +6,18 @@ import 'dart:async';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:pitwatch/services/token_service.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:pitwatch/providers/pothole_provider.dart';
 
-class SplashScreen extends StatefulWidget {
+class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
 
   @override
-  State<SplashScreen> createState() => _SplashScreenState();
+  ConsumerState<SplashScreen> createState() => _SplashScreenState();
 }
 
-class _SplashScreenState extends State<SplashScreen> {
+class _SplashScreenState extends ConsumerState<SplashScreen> {
+  bool _isLoading = false;
   @override
   void initState() {
     super.initState();
@@ -22,6 +25,7 @@ class _SplashScreenState extends State<SplashScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _maybeRequestLocationPermissionOnce();
       if (!mounted) return;
+      // small visual delay before starting network work
       Timer(const Duration(seconds: 2), () async {
         if (!mounted) return;
         try {
@@ -43,11 +47,29 @@ class _SplashScreenState extends State<SplashScreen> {
           if (refresh != null && refresh.trim().isNotEmpty) {
             TokenService.startAutoRefresh();
           }
-
+          // If we have a token, prefetch reports and counts and store them in provider.
           if (token != null && token.trim().isNotEmpty) {
-            Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (_) => const MainScreen()),
-            );
+            setState(() {
+              _isLoading = true;
+            });
+            try {
+              // Fetch reports via the provider which will also set the total
+              // count to the length of the fetched list. This avoids calling
+              // the separate counts endpoint.
+              await ref
+                  .read(potholeProvider.notifier)
+                  .fetchReports(page: 1, pageSize: 1000);
+            } catch (e) {
+              debugPrint('Prefetch reports/counts failed: $e');
+            } finally {
+              if (!mounted) return;
+              setState(() {
+                _isLoading = false;
+              });
+              Navigator.of(context).pushReplacement(
+                MaterialPageRoute(builder: (_) => const MainScreen()),
+              );
+            }
           } else {
             Navigator.of(context).pushReplacement(
               MaterialPageRoute(builder: (_) => const SignupPage()),
@@ -113,6 +135,7 @@ class _SplashScreenState extends State<SplashScreen> {
                   fit: BoxFit.contain,
                 ),
                 SizedBox(height: 24.h),
+                if (_isLoading) const CircularProgressIndicator(),
               ],
             ),
           ),

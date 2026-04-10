@@ -47,7 +47,8 @@ class TokenService {
         return {'ok': false, 'message': 'no_refresh_token'};
       }
 
-      final body = json.encode({'refresh_token': refresh.trim()});
+      // Use the standard Simple JWT key name `refresh` for compatibility.
+      final body = json.encode({'refresh': refresh.trim()});
       final resp = await http
           .post(
             Uri.parse(_refreshUrl),
