@@ -10,10 +10,21 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
 
   static const _kReportsKey = 'cached_reports_v1';
   static const _kReportsVirtualCountKey = 'cached_reports_v1_virtual_count';
+  static const _kReportsServerCountKey = 'cached_reports_v1_server_count';
 
   int _virtualCount = 0;
+  int _serverCount = 0;
 
   int get totalCount => state.length + _virtualCount;
+
+  int get serverCount => _serverCount;
+
+  void setServerCount(int c) {
+    _serverCount = c;
+    // write prefs and notify listeners by re-assigning state (no-op change)
+    saveToPrefs();
+    state = [...state];
+  }
 
   int get last30DaysCount {
     final cutoff = DateTime.now().subtract(const Duration(days: 30));
@@ -92,6 +103,7 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
       final list = state.map((e) => e.toJson()).toList();
       await prefs.setString(_kReportsKey, jsonEncode(list));
       await prefs.setInt(_kReportsVirtualCountKey, _virtualCount);
+      await prefs.setInt(_kReportsServerCountKey, _serverCount);
     } catch (_) {
       // ignore
     }
@@ -119,6 +131,11 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
       } catch (_) {
         _virtualCount = 0;
       }
+      try {
+        _serverCount = prefs.getInt(_kReportsServerCountKey) ?? 0;
+      } catch (_) {
+        _serverCount = 0;
+      }
     } catch (_) {
       // ignore
     }
@@ -127,6 +144,7 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
   void clear() {
     state = [];
     _virtualCount = 0;
+    _serverCount = 0;
     saveToPrefs();
   }
 }
@@ -142,6 +160,12 @@ final totalCountProvider = Provider<int>((ref) {
   // Access the notifier to read private virtual count via exposed totalCount
   final notifier = ref.read(potholeProvider.notifier);
   return notifier.totalCount;
+});
+
+/// Server-provided total reports count (from API `count` field)
+final reportsApiCountProvider = Provider<int>((ref) {
+  final notifier = ref.watch(potholeProvider.notifier);
+  return notifier.serverCount;
 });
 
 final last30DaysCountProvider = Provider<int>((ref) {

@@ -67,7 +67,11 @@ class HomeScreen extends ConsumerWidget {
                     SizedBox(height: 24.h),
                     StatsCard(
                       title: 'Pothole',
-                      value: ref.watch(totalCountProvider).toString(),
+                      value:
+                          (ref.watch(reportsApiCountProvider) > 0
+                                  ? ref.watch(reportsApiCountProvider)
+                                  : ref.watch(totalCountProvider))
+                              .toString(),
                       subtitle: 'Detected total',
                     ),
                     SizedBox(height: 20.h),

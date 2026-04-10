@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:pitwatch/models/pothole.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pitwatch/providers/pothole_provider.dart';
+import 'package:pitwatch/services/report_service.dart';
 import 'package:pitwatch/widgets/issue_card.dart';
 
 enum FilterStatus { all, reported, fixed, inProgress }
@@ -20,30 +21,62 @@ class _DetectionHistoryScreenState
     extends ConsumerState<DetectionHistoryScreen> {
   FilterStatus selectedFilter = FilterStatus.all;
   bool _loading = true;
+  String? _errorMessage;
+
+  Future<void> _loadReports() async {
+    setState(() {
+      _loading = true;
+      _errorMessage = null;
+    });
+    try {
+      // Migrate any session detections into global provider first
+      final existing = ref.read(sessionPotholesProvider);
+      if (existing.isNotEmpty) {
+        ref.read(potholeProvider.notifier).addFromMaps(existing);
+      }
+      ref.read(sessionPotholesProvider.notifier).clear();
+
+      // Fetch persisted reports from server (uses ReportService for auth)
+      final resp = await ReportService.fetchReports(page: 1, pageSize: 50);
+      if (resp['ok'] == true && resp['data'] is Map<String, dynamic>) {
+        final data = resp['data'] as Map<String, dynamic>;
+        final count = (data['count'] is int)
+            ? data['count'] as int
+            : int.tryParse('${data['count']}') ?? 0;
+        final results = data['results'] as List<dynamic>? ?? [];
+
+        // Replace provider state with fetched results
+        ref.read(potholeProvider.notifier).clear();
+        final maps = <Map<String, dynamic>>[];
+        for (final item in results) {
+          if (item is Map<String, dynamic>) maps.add(item);
+        }
+        if (maps.isNotEmpty)
+          ref.read(potholeProvider.notifier).addFromMaps(maps);
+        // store server count in provider for Home screen use
+        ref.read(potholeProvider.notifier).setServerCount(count);
+      } else {
+        // fallback to notifier fetch if the service call failed
+        await ref.read(potholeProvider.notifier).fetchReports();
+      }
+    } catch (e) {
+      debugPrint('Failed to load reports: $e');
+      _errorMessage = 'Failed to load reports';
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     // Load reports from remote API and migrate any in-session detections.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      try {
-        // Migrate any session detections into global provider first
-        final existing = ref.read(sessionPotholesProvider);
-        if (existing.isNotEmpty) {
-          ref.read(potholeProvider.notifier).addFromMaps(existing);
-        }
-        ref.read(sessionPotholesProvider.notifier).clear();
-
-        // Fetch persisted reports from server and populate provider
-        await ref.read(potholeProvider.notifier).fetchReports();
-      } catch (_) {
-        // ignore errors
-      } finally {
-        if (mounted) {
-          setState(() {
-            _loading = false;
-          });
-        }
-      }
+      await _loadReports();
     });
   }
 
@@ -133,35 +166,51 @@ class _DetectionHistoryScreenState
                             ),
                           ),
                         )
-                      : ListView.builder(
-                          padding: EdgeInsets.zero,
-                          itemCount: filtered.length + 1,
-                          itemBuilder: (context, index) {
-                            if (index < filtered.length) {
-                              final issue = filtered[index];
-                              return Padding(
-                                padding: EdgeInsets.only(bottom: 12.h),
-                                child: IssueCard(data: issue),
-                              );
-                            }
-                            // footer with counts/spacing
-                            return Padding(
-                              padding: EdgeInsets.symmetric(vertical: 20.h),
-                              child: Column(
-                                children: [
-                                  Text(
-                                    "Showing ${filtered.length} of ${ref.watch(totalCountProvider)} detections",
-                                    style: GoogleFonts.inter(
-                                      fontSize: 12.sp,
-                                      color: const Color(0xFF64748B),
+                      : (_errorMessage != null
+                            ? Center(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(_errorMessage!),
+                                    SizedBox(height: 12.h),
+                                    ElevatedButton(
+                                      onPressed: _loadReports,
+                                      child: const Text('Retry'),
                                     ),
-                                  ),
-                                  SizedBox(height: 40.h),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
+                                  ],
+                                ),
+                              )
+                            : ListView.builder(
+                                padding: EdgeInsets.zero,
+                                itemCount: filtered.length + 1,
+                                itemBuilder: (context, index) {
+                                  if (index < filtered.length) {
+                                    final issue = filtered[index];
+                                    return Padding(
+                                      padding: EdgeInsets.only(bottom: 12.h),
+                                      child: IssueCard(data: issue),
+                                    );
+                                  }
+                                  // footer with counts/spacing
+                                  return Padding(
+                                    padding: EdgeInsets.symmetric(
+                                      vertical: 20.h,
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        Text(
+                                          "Showing ${filtered.length} of ${ref.watch(totalCountProvider)} detections",
+                                          style: GoogleFonts.inter(
+                                            fontSize: 12.sp,
+                                            color: const Color(0xFF64748B),
+                                          ),
+                                        ),
+                                        SizedBox(height: 40.h),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              )),
                 ),
               ],
             ),

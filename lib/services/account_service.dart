@@ -114,10 +114,26 @@ class AccountService {
             accessVal ??= d is Map ? d['access_token']?.toString() : null;
           }
 
+          // some APIs nest tokens under `user` (e.g., {detail:..., user:{access:..., refresh:...}})
+          if (accessVal == null && jsonBody.containsKey('user')) {
+            final u = jsonBody['user'];
+            if (u is Map && u.containsKey('access'))
+              accessVal = u['access']?.toString();
+            accessVal ??= u is Map ? u['access_token']?.toString() : null;
+            accessVal ??= u is Map ? u['token']?.toString() : null;
+          }
+
           String? refreshVal;
           if (jsonBody.containsKey('refresh'))
             refreshVal = jsonBody['refresh']?.toString();
           refreshVal ??= jsonBody['refresh_token']?.toString();
+
+          if (refreshVal == null && jsonBody.containsKey('user')) {
+            final u = jsonBody['user'];
+            if (u is Map && u.containsKey('refresh'))
+              refreshVal = u['refresh']?.toString();
+            refreshVal ??= u is Map ? u['refresh_token']?.toString() : null;
+          }
 
           if (accessVal != null && accessVal.trim().isNotEmpty) {
             await prefs.setString('access_token', accessVal.trim());

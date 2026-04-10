@@ -92,6 +92,52 @@ class ReportService {
     return results;
   }
 
+  /// Fetch paginated reports for the current user.
+  /// Returns a map with `ok` bool and `data` when successful. Example `data`
+  /// matches the API shape: `{count, page, page_size, results: [...]}`
+  static Future<Map<String, dynamic>> fetchReports({
+    int page = 1,
+    int pageSize = 10,
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('access_token');
+
+      final uri = Uri.parse('$_base?page=$page&page_size=$pageSize');
+      final headers = {
+        'Accept': 'application/json',
+        'User-Agent': 'pitwatch/1.0',
+      };
+      if (token != null && token.trim().isNotEmpty) {
+        headers['Authorization'] = 'Bearer ${token.trim()}';
+      }
+
+      final resp = await http
+          .get(uri, headers: headers)
+          .timeout(const Duration(seconds: 12));
+      final status = resp.statusCode;
+      if (status >= 200 && status < 300) {
+        final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
+        return {'ok': true, 'data': decoded};
+      }
+
+      try {
+        final decoded = jsonDecode(resp.body);
+        return {
+          'ok': false,
+          'status': status,
+          'message': decoded is Map && decoded['detail'] != null
+              ? decoded['detail'].toString()
+              : decoded.toString(),
+        };
+      } catch (_) {
+        return {'ok': false, 'status': status, 'message': resp.body};
+      }
+    } catch (e) {
+      return {'ok': false, 'message': e.toString()};
+    }
+  }
+
   static Future<String?> _reverseGeocode(double lat, double lon) async {
     try {
       final uri = Uri.parse('$_nominatim&lat=$lat&lon=$lon');
