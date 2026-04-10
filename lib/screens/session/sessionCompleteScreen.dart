@@ -31,16 +31,117 @@ class SessionCompleteScreen extends ConsumerStatefulWidget {
 }
 
 class _SessionCompleteScreenState extends ConsumerState<SessionCompleteScreen> {
+  bool _uploading = true;
+  int _uploaded = 0;
+  int _total = 0;
   @override
   void dispose() {
-    try {
-      final sessionDetections = ref.read(sessionPotholesProvider);
-      if (sessionDetections.isNotEmpty) {
-        ref.read(potholeProvider.notifier).addFromMaps(sessionDetections);
-      }
-      ref.read(sessionPotholesProvider.notifier).clear();
-    } catch (_) {}
+    // Do not automatically migrate session detections here. Upload is
+    // triggered on screen entry; successes are migrated when upload
+    // finishes. Leave any failed session detections in session storage
+    // for later retry.
     super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _startUpload();
+    });
+  }
+
+  Future<void> _startUpload() async {
+    setState(() {
+      _uploading = true;
+      _uploaded = 0;
+      _total = 0;
+    });
+
+    final sessionDetections = ref.read(sessionPotholesProvider);
+    // prefer session provider, fall back to passed detections
+    final raw = sessionDetections.isNotEmpty
+        ? sessionDetections
+        : widget.detections;
+
+    if (raw.isEmpty) {
+      setState(() {
+        _uploading = false;
+      });
+      return;
+    }
+
+    // parse into models
+    final parsed = raw
+        .map((d) {
+          try {
+            return PotholeDetection.fromJson(Map<String, dynamic>.from(d));
+          } catch (_) {
+            return null;
+          }
+        })
+        .whereType<PotholeDetection>()
+        .toList();
+
+    _total = parsed.length;
+
+    List<Map<String, dynamic>> results = [];
+    try {
+      results = await ReportService.postReports(parsed);
+    } catch (e) {
+      debugPrint('ReportService error: $e');
+    }
+
+    // migrate successes to global provider; keep failed ones in session provider
+    final failedMaps = <Map<String, dynamic>>[];
+    final errors = <String>[];
+    for (var i = 0; i < results.length; i++) {
+      final res = results[i];
+      final ok = res['ok'] == true;
+      if (ok) {
+        try {
+          ref.read(potholeProvider.notifier).addDetection(parsed[i]);
+        } catch (_) {}
+      } else {
+        // re-add original map for retry later
+        try {
+          failedMaps.add(Map<String, dynamic>.from(raw[i]));
+        } catch (_) {}
+        final msg = (res['message'] != null)
+            ? res['message'].toString()
+            : 'Unknown error (status: ${res['status']})';
+        errors.add('Item ${i + 1}: $msg');
+      }
+    }
+
+    // replace session provider with failed maps (if any)
+    ref.read(sessionPotholesProvider.notifier).clear();
+    for (final m in failedMaps) {
+      ref.read(sessionPotholesProvider.notifier).add(m);
+    }
+
+    setState(() {
+      _uploaded = results.where((r) => r['ok'] == true).length;
+      _uploading = false;
+    });
+
+    // If there were errors, show dialog with messages
+    if (errors.isNotEmpty && mounted) {
+      final content = errors.join('\n\n');
+      showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Upload errors'),
+          content: SingleChildScrollView(child: Text(content)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   @override
@@ -128,8 +229,14 @@ class _SessionCompleteScreenState extends ConsumerState<SessionCompleteScreen> {
 
                     SizedBox(height: 20.h),
 
-                    /// SUCCESS BUTTON
-                    SuccessButton(onTap: () {}),
+                    /// SUCCESS / UPLOAD STATUS BANNER
+                    SuccessButton(
+                      text: _uploading
+                          ? 'Uploading...'
+                          : 'Upload Complete (${_uploaded}/$_total)',
+                      loading: _uploading,
+                      onTap: null,
+                    ),
 
                     SizedBox(height: 16.h),
 
@@ -188,60 +295,29 @@ class _SessionCompleteScreenState extends ConsumerState<SessionCompleteScreen> {
                       SizedBox(height: 12.h),
                     ],
 
-                    /// BACK TO HOME
-                    GestureDetector(
-                      onTap: () async {
-                        try {
-                          final sessionDetections = ref.read(
-                            sessionPotholesProvider,
-                          );
-                          if (sessionDetections.isNotEmpty) {
-                            // parse session detections
-                            final parsed = sessionDetections
-                                .map((d) {
-                                  try {
-                                    return PotholeDetection.fromJson(
-                                      Map<String, dynamic>.from(d),
-                                    );
-                                  } catch (_) {
-                                    return null;
-                                  }
-                                })
-                                .whereType<PotholeDetection>()
-                                .toList();
-
-                            // Post reports and collect results
-                            List<bool> results = [];
-                            try {
-                              results = await ReportService.postReports(parsed);
-                            } catch (e) {
-                              debugPrint('ReportService error: $e');
-                            }
-
-                            // For every successful post, add to global provider
-                            for (var i = 0; i < results.length; i++) {
-                              if (results[i]) {
-                                try {
-                                  ref
-                                      .read(potholeProvider.notifier)
-                                      .addDetection(parsed[i]);
-                                } catch (_) {}
-                              }
-                            }
-                          }
-                          ref.read(sessionPotholesProvider.notifier).clear();
-                        } catch (_) {}
-                        Navigator.of(context).pushReplacement(
-                          MaterialPageRoute(builder: (_) => const MainScreen()),
-                        );
-                      },
-                      child: Text(
-                        "Back to Home",
-                        style: GoogleFonts.inter(
-                          fontSize: 16.sp,
-                          fontWeight: FontWeight.w600,
-                          height: 24 / 16,
-                          color: const Color(0xFF64748B),
+                    /// BACK TO HOME (disabled while uploading)
+                    AbsorbPointer(
+                      absorbing: _uploading,
+                      child: GestureDetector(
+                        onTap: _uploading
+                            ? null
+                            : () {
+                                Navigator.of(context).pushReplacement(
+                                  MaterialPageRoute(
+                                    builder: (_) => const MainScreen(),
+                                  ),
+                                );
+                              },
+                        child: Text(
+                          "Back to Home",
+                          style: GoogleFonts.inter(
+                            fontSize: 16.sp,
+                            fontWeight: FontWeight.w600,
+                            height: 24 / 16,
+                            color: _uploading
+                                ? const Color(0xFF94A3B8)
+                                : const Color(0xFF64748B),
+                          ),
                         ),
                       ),
                     ),

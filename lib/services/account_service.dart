@@ -149,4 +149,75 @@ class AccountService {
       return {'success': false, 'message': 'Network error: $e'};
     }
   }
+
+  static const String _logoutUrl =
+      'https://pitwatch.onrender.com/api/v1/accounts/admin/logout/';
+
+  /// Log out by posting the refresh token to the server, then clearing
+  /// stored credentials from SharedPreferences. Returns a map with
+  /// `success` and `message`.
+  static Future<Map<String, dynamic>> logout() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final refresh = prefs.getString('refresh_token');
+      final access = prefs.getString('access_token');
+
+      if (refresh == null || refresh.trim().isEmpty) {
+        // No refresh token; just clear stored credentials
+        await prefs.remove('access_token');
+        await prefs.remove('refresh_token');
+        await prefs.remove('auth_payload');
+        return {'success': true, 'message': 'Logged out locally'};
+      }
+
+      final uri = Uri.parse(_logoutUrl);
+      final body = json.encode({'refresh_token': refresh});
+      final headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'User-Agent': 'pitwatch/1.0',
+      };
+      if (access != null && access.trim().isNotEmpty) {
+        headers['Authorization'] = 'Bearer ${access.trim()}';
+      }
+
+      final resp = await http
+          .post(uri, headers: headers, body: body)
+          .timeout(const Duration(seconds: 10));
+
+      // Regardless of server response, remove local tokens to log out.
+      await prefs.remove('access_token');
+      await prefs.remove('refresh_token');
+      await prefs.remove('auth_payload');
+
+      if (resp.statusCode >= 200 && resp.statusCode < 300) {
+        return {'success': true, 'message': 'Logged out'};
+      }
+
+      // try to decode error
+      try {
+        final decoded = json.decode(resp.body);
+        return {
+          'success': false,
+          'message': decoded is Map && decoded['detail'] != null
+              ? decoded['detail'].toString()
+              : 'Logout failed (status ${resp.statusCode})',
+        };
+      } catch (_) {
+        return {
+          'success': false,
+          'message': 'Logout failed (status ${resp.statusCode})',
+        };
+      }
+    } catch (e) {
+      // On network error, still clear local tokens
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove('access_token');
+        await prefs.remove('refresh_token');
+        await prefs.remove('auth_payload');
+      } catch (_) {}
+      return {'success': false, 'message': 'Network error: $e'};
+    }
+  }
 }

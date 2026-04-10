@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:pitwatch/screens/auth/signup_page.dart';
+import 'package:pitwatch/services/account_service.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -72,7 +74,51 @@ class ProfileScreen extends StatelessWidget {
                     ActionCard(
                       text: 'Log Out',
                       icon: Icons.logout_outlined,
-                      onTap: () {},
+                      onTap: () async {
+                        // show progress dialog
+                        showDialog<void>(
+                          context: context,
+                          barrierDismissible: false,
+                          builder: (ctx) =>
+                              const Center(child: CircularProgressIndicator()),
+                        );
+                        final res = await AccountService.logout();
+                        if (Navigator.canPop(context))
+                          Navigator.of(context).pop();
+                        // navigate to signup regardless; show error if logout failed
+                        if (res['success'] == true) {
+                          Navigator.of(context).pushAndRemoveUntil(
+                            MaterialPageRoute(
+                              builder: (_) => const SignupPage(),
+                            ),
+                            (route) => false,
+                          );
+                        } else {
+                          // show error then navigate to signup
+                          if (res['message'] != null) {
+                            showDialog(
+                              context: context,
+                              builder: (_) => AlertDialog(
+                                title: const Text('Logout'),
+                                content: Text(res['message'].toString()),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.of(context).pop(),
+                                    child: const Text('OK'),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }
+                          Navigator.of(context).pushAndRemoveUntil(
+                            MaterialPageRoute(
+                              builder: (_) => const SignupPage(),
+                            ),
+                            (route) => false,
+                          );
+                        }
+                      },
                     ),
                   ],
                 ),

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:pitwatch/models/pothole.dart';
 
 class ReportService {
@@ -11,7 +12,9 @@ class ReportService {
 
   /// Post a single `PotholeDetection` to the backend.
   /// Returns true when server responds with 2xx.
-  static Future<bool> postReport(PotholeDetection detection) async {
+  static Future<Map<String, dynamic>> postReport(
+    PotholeDetection detection,
+  ) async {
     try {
       // Attempt to reverse-geocode coordinates to produce a user-friendly
       // title. Nominatim requires a User-Agent header.
@@ -32,32 +35,59 @@ class ReportService {
         'longitude': detection.longitude,
       };
       final body = json.encode(bodyMap);
+
+      // Include access token from SharedPreferences if available
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('access_token');
+      final headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'User-Agent': 'pitwatch/1.0',
+      };
+      if (token != null && token.trim().isNotEmpty) {
+        headers['Authorization'] = 'Bearer ${token.trim()}';
+      }
+
       final resp = await http
-          .post(
-            uri,
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json',
-              'User-Agent': 'pitwatch/1.0',
-            },
-            body: body,
-          )
+          .post(uri, headers: headers, body: body)
           .timeout(const Duration(seconds: 15));
 
-      return resp.statusCode >= 200 && resp.statusCode < 300;
+      final status = resp.statusCode;
+      if (status >= 200 && status < 300) {
+        return {'ok': true, 'status': status, 'message': resp.body};
+      }
+
+      // Try to decode server error message
+      try {
+        final decoded = jsonDecode(resp.body);
+        if (decoded is Map && decoded['detail'] != null) {
+          return {
+            'ok': false,
+            'status': status,
+            'message': decoded['detail'].toString(),
+          };
+        }
+        if (decoded is Map) {
+          return {'ok': false, 'status': status, 'message': decoded.toString()};
+        }
+      } catch (_) {}
+
+      return {'ok': false, 'status': status, 'message': resp.body};
     } catch (e) {
       // network or parse error
-      return false;
+      return {'ok': false, 'status': null, 'message': e.toString()};
     }
   }
 
   /// Post multiple detections in sequence. Returns list of booleans
   /// indicating success for each item in the same order.
-  static Future<List<bool>> postReports(List<PotholeDetection> list) async {
-    final results = <bool>[];
+  static Future<List<Map<String, dynamic>>> postReports(
+    List<PotholeDetection> list,
+  ) async {
+    final results = <Map<String, dynamic>>[];
     for (final d in list) {
-      final ok = await postReport(d);
-      results.add(ok);
+      final res = await postReport(d);
+      results.add(res);
     }
     return results;
   }
