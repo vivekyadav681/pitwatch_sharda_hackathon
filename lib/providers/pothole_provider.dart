@@ -38,6 +38,9 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
   }
 
   void addDetection(PotholeDetection detection) {
+    // Avoid adding duplicate by `id`.
+    final exists = state.any((d) => d.id == detection.id);
+    if (exists) return;
     state = [...state, detection];
     saveToPrefs();
   }
@@ -54,14 +57,89 @@ class PotholeNotifier extends StateNotifier<List<PotholeDetection>> {
   /// objects. Maps will be converted using `PotholeDetection.fromJson`.
   void addFromMaps(List<Map<String, dynamic>> maps) {
     if (maps.isEmpty) return;
+
     final parsed = <PotholeDetection>[];
-    for (final m in maps) {
+    final existingIds = state.map((e) => e.id).toSet();
+
+    for (final raw in maps) {
       try {
-        parsed.add(PotholeDetection.fromJson(m));
+        // Normalize common key variations into the shape expected by
+        // PotholeDetection.fromJson.
+        final Map<String, dynamic> m = Map<String, dynamic>.from(raw);
+
+        // createdAt vs created_at
+        if (m.containsKey('createdAt') && !m.containsKey('created_at')) {
+          m['created_at'] = m['createdAt'];
+        }
+
+        // latitude/longitude variants
+        if (!m.containsKey('latitude') && m.containsKey('lat')) {
+          m['latitude'] = m['lat'];
+        }
+        if (!m.containsKey('longitude') && m.containsKey('lon')) {
+          m['longitude'] = m['lon'];
+        }
+        if (!m.containsKey('longitude') && m.containsKey('lng')) {
+          m['longitude'] = m['lng'];
+        }
+
+        // status may come as enum or differently named key
+        if (!m.containsKey('status') && m.containsKey('state')) {
+          m['status'] = m['state'];
+        }
+
+        // id may be string; try to coerce to int
+        if (m.containsKey('id') && m['id'] is String) {
+          final v = int.tryParse(m['id'] as String);
+          if (v != null) m['id'] = v;
+        }
+
+        // If id missing, try to create a stable id from lat/lon/created_at
+        if (!m.containsKey('id') || m['id'] == null) {
+          final lat = (m['latitude'] is num)
+              ? (m['latitude'] as num).toDouble()
+              : 0.0;
+          final lon = (m['longitude'] is num)
+              ? (m['longitude'] as num).toDouble()
+              : 0.0;
+          final created = (m['created_at'] ?? '').toString();
+          m['id'] =
+              (lat.toStringAsFixed(6) +
+                      '|' +
+                      lon.toStringAsFixed(6) +
+                      '|' +
+                      created)
+                  .hashCode;
+        }
+
+        // Ensure minimal required fields exist
+        if (!m.containsKey('title') ||
+            !m.containsKey('description') ||
+            !m.containsKey('created_at')) {
+          // skip incomplete item
+          continue;
+        }
+
+        final candidate = PotholeDetection.fromJson(m);
+
+        // Deduplicate by id or by very close coordinates + timestamp
+        if (existingIds.contains(candidate.id)) continue;
+
+        final duplicateNearby = state.any((e) {
+          final sameTime = (e.createdAt == candidate.createdAt);
+          final latEq = (e.latitude - candidate.latitude).abs() < 0.0001;
+          final lonEq = (e.longitude - candidate.longitude).abs() < 0.0001;
+          return sameTime && latEq && lonEq;
+        });
+        if (duplicateNearby) continue;
+
+        parsed.add(candidate);
+        existingIds.add(candidate.id);
       } catch (_) {
-        // ignore parse errors
+        // ignore parse errors and skip item
       }
     }
+
     if (parsed.isNotEmpty) state = [...state, ...parsed];
     // persist cache
     saveToPrefs();

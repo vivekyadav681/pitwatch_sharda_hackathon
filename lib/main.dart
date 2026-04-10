@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:pitwatch/screens/splash_screen.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 void main() {
   runApp(const ProviderScope(child: MyApp()));
@@ -17,6 +18,24 @@ class MyApp extends StatelessWidget {
       builder: (context, child) {
         return MaterialApp(
           debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            primaryColor: const Color(0xFF1E3A8A),
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF1E3A8A),
+            ),
+            scaffoldBackgroundColor: const Color(0xFFF8FAFC),
+            textTheme: GoogleFonts.interTextTheme(ThemeData.light().textTheme)
+                .apply(
+                  bodyColor: const Color(0xFF1E293B),
+                  displayColor: const Color(0xFF1E293B),
+                ),
+            elevatedButtonTheme: ElevatedButtonThemeData(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1E3A8A),
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ),
           home: const SplashScreen(),
         );
       },

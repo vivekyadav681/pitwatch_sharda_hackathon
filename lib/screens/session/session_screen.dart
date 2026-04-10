@@ -45,7 +45,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   List<PotholeDetection> _sessionDetections = [];
   static const double _detectionThreshold = 0.9;
-  static const double _nmsIouThreshold = 0.45;
   int _hazardsCount = 0;
   bool _sessionEnded = false;
 
